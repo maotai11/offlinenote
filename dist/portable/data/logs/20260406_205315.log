@@ -1,0 +1,12 @@
+2026-04-06 20:53:15 [INFO] Running startup checks...
+2026-04-06 20:53:15 [WARNING] Bundled fallback font not found at: C:\Users\LIN\OfflineNote\dist\portable\resources\fonts\NotoSans
+2026-04-06 20:53:15 [INFO] All startup checks passed.
+2026-04-06 20:53:15 [INFO] AppController created
+2026-04-06 20:53:16 [INFO] Application startup complete
+2026-04-06 20:55:54 [INFO] 正在載入圖片: C:\Users\LIN\Downloads\1774186003768-019d15b9-4a9f-7843-970b-b53df21a0111.png
+2026-04-06 20:55:55 [INFO] 已插入圖片: 2615x3701
+2026-04-06 20:57:24 [INFO] 儲存失敗: 無法建立 C:\Users\LIN\OfflineNote\dist\portable\data\notes\筆記_1.onote
+2026-04-06 21:01:52 [INFO] 已匯出 PDF: C:\Users\LIN\Downloads\note.pdf
+2026-04-06 21:05:11 [INFO] Application shutting down
+2026-04-06 21:05:11 [INFO] AppController destroying
+2026-04-06 21:05:11 [INFO] Shutdown complete

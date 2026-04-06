@@ -1,0 +1,12 @@
+2026-04-06 23:05:40 [INFO] Running startup checks...
+2026-04-06 23:05:40 [WARNING] Bundled fallback font not found at: C:\Users\LIN\OfflineNote\dist\portable\resources\fonts\NotoSans
+2026-04-06 23:05:40 [INFO] All startup checks passed.
+2026-04-06 23:05:40 [INFO] AppController created
+2026-04-06 23:05:42 [INFO] Application startup complete
+2026-04-06 23:05:47 [INFO] 已刪除筆記
+2026-04-06 23:05:55 [INFO] Auto-save: 筆記 2
+2026-04-06 23:06:07 [INFO] 儲存失敗: 無法建立 C:\Users\LIN\OfflineNote\dist\portable/data/notes/筆記_2.onote
+2026-04-06 23:06:07 [INFO] 批次匯出失敗: 儲存失敗 筆記 2
+2026-04-06 23:06:24 [INFO] 儲存失敗: 無法建立 C:\Users\LIN\OfflineNote\dist\portable/data/notes/筆記_2.onote
+2026-04-06 23:06:24 [INFO] AppController destroying
+2026-04-06 23:06:24 [FATAL] Unhandled exception: filesystem error: cannot copy file: No such file or directory [C:\Users\LIN\OfflineNote\dist\portable/data/notes/筆記_2.onote] [C:\Users\LIN\Downloads\筆記 2.onote]

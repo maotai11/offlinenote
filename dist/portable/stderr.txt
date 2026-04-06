@@ -1,0 +1,14 @@
+
+(offlinenote.exe:21116): GLib-GIO-WARNING **: 17:16:43.733: win32 session dbus binary not found
+
+(offlinenote.exe:21116): GdkPixbuf-WARNING **: 17:16:43.751: Error parsing loader info in 'C:\Users\LIN\OfflineNote\dist\portable\lib\gdk-pixbuf-2.0\2.10.0\loaders.cache'
+  ".\lib\gdk-pixbuf-2.0\2.10.0\loaders\libpixbufloader-ani.dll" 1
+
+(offlinenote.exe:21116): GdkPixbuf-WARNING **: 17:16:43.751: Error parsing loader info in 'C:\Users\LIN\OfflineNote\dist\portable\lib\gdk-pixbuf-2.0\2.10.0\loaders.cache'
+  ".\lib\gdk-pixbuf-2.0\2.10.0\loaders\libpixbufloader-ani.dll" 1
+2026-04-06 17:16:43 [INFO] Application activating
+2026-04-06 17:16:43 [INFO] PathManager initialized, portable=true
+2026-04-06 17:16:43 [INFO] exeDir=C:\Users\LIN\OfflineNote\dist\portable
+2026-04-06 17:16:43 [INFO] PathManager initialized, dataDir=C:\Users\LIN\OfflineNote\dist\portable\data
+
+(offlinenote.exe:21116): Gtk-CRITICAL **: 17:16:43.990: gtk_bin_get_child: assertion 'GTK_IS_BIN (bin)' failed

@@ -1,0 +1,16 @@
+﻿# GDK-Pixbuf loader cache (portable)
+".\lib\gdk-pixbuf-2.0\2.10.0\loaders\libpixbufloader-ani.dll" 1
+".\lib\gdk-pixbuf-2.0\2.10.0\loaders\libpixbufloader-bmp.dll" 1
+".\lib\gdk-pixbuf-2.0\2.10.0\loaders\libpixbufloader-gif.dll" 1
+".\lib\gdk-pixbuf-2.0\2.10.0\loaders\libpixbufloader-icns.dll" 1
+".\lib\gdk-pixbuf-2.0\2.10.0\loaders\libpixbufloader-ico.dll" 1
+".\lib\gdk-pixbuf-2.0\2.10.0\loaders\libpixbufloader-jpeg.dll" 1
+".\lib\gdk-pixbuf-2.0\2.10.0\loaders\libpixbufloader-png.dll" 1
+".\lib\gdk-pixbuf-2.0\2.10.0\loaders\libpixbufloader-pnm.dll" 1
+".\lib\gdk-pixbuf-2.0\2.10.0\loaders\libpixbufloader-qtif.dll" 1
+".\lib\gdk-pixbuf-2.0\2.10.0\loaders\libpixbufloader-tga.dll" 1
+".\lib\gdk-pixbuf-2.0\2.10.0\loaders\libpixbufloader-tiff.dll" 1
+".\lib\gdk-pixbuf-2.0\2.10.0\loaders\libpixbufloader-xbm.dll" 1
+".\lib\gdk-pixbuf-2.0\2.10.0\loaders\libpixbufloader-xpm.dll" 1
+".\lib\gdk-pixbuf-2.0\2.10.0\loaders\pixbufloader_svg.dll" 1
+
