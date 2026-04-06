@@ -1346,73 +1346,76 @@ static std::string note_filename(NoteData* nd) {
     return get_save_dir() + "\\" + fn + ".onote";
 }
 
-// Simple text-based serialization
+// Helper: Convert UTF-8 string to wide string (for Windows file paths)
+static std::wstring utf8_to_wide(const std::string& utf8) {
+    int len = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
+    if (len <= 0) return L"";
+    std::wstring result(len, 0);
+    MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, &result[0], len);
+    if (!result.empty() && result.back() == L'\0') result.pop_back();
+    return result;
+}
+
+// Helper: Open file with wide string path, returns FILE* or nullptr
+static FILE* wfopen_utf8(const std::string& path_utf8, const wchar_t* mode) {
+    std::wstring wpath = utf8_to_wide(path_utf8);
+    return _wfopen(wpath.c_str(), mode);
+}
+
+// Simple text-based serialization using FILE* for wide path support
 static bool save_note_to_file(NoteData* nd) {
-    std::string fn = note_filename(nd);
-    std::ofstream ofs(fn, std::ios::binary);
-    if (!ofs.is_open()) {
-        logInfo("儲存失敗: 無法建立 %s", fn.c_str());
+    std::string fn_utf8 = note_filename(nd);
+    FILE* f = wfopen_utf8(fn_utf8, L"wb");
+    if (!f) {
+        logInfo("儲存失敗: 無法建立 %s", fn_utf8.c_str());
         return false;
     }
 
     // Simple format: key=value lines, sections for pages
-    ofs << "# OfflineNote v1\n";
-    ofs << "name=" << nd->name << "\n";
-    ofs << "pages=" << nd->pages.size() << "\n";
+    fprintf(f, "# OfflineNote v1\n");
+    fprintf(f, "name=%s\n", nd->name.c_str());
+    fprintf(f, "pages=%zu\n", nd->pages.size());
 
     for (size_t pi = 0; pi < nd->pages.size(); pi++) {
         PageData* pg = &nd->pages[pi];
-        ofs << "[page " << pi << "]\n";
-        ofs << "pw=" << pg->pw << "\n";
-        ofs << "ph=" << pg->ph << "\n";
-        ofs << "strokes=" << pg->strokes.size() << "\n";
-        ofs << "images=" << pg->images.size() << "\n";
-        ofs << "texts=" << pg->texts.size() << "\n";
+        fprintf(f, "[page %zu]\n", pi);
+        fprintf(f, "pw=%g\nph=%g\n", pg->pw, pg->ph);
+        fprintf(f, "strokes=%zu\nimages=%zu\ntexts=%zu\n", pg->strokes.size(), pg->images.size(), pg->texts.size());
 
         // Save strokes
         for (size_t si = 0; si < pg->strokes.size(); si++) {
             StrokeData* s = &pg->strokes[si];
-            ofs << "s " << si << " w=" << s->w << " r=" << s->r << " g=" << s->g << " b=" << s->b << " a=" << s->a << " t=" << s->tool << "\n";
+            fprintf(f, "s %zu w=%g r=%g g=%g b=%g a=%g t=%d\n", si, s->w, s->r, s->g, s->b, s->a, s->tool);
             for (size_t pi2 = 0; pi2 < s->x.size(); pi2++) {
-                ofs << "p " << s->x[pi2] << " " << s->y[pi2] << "\n";
+                fprintf(f, "p %g %g\n", s->x[pi2], s->y[pi2]);
             }
         }
 
         // Save texts
         for (size_t ti = 0; ti < pg->texts.size(); ti++) {
             TxtEl* t = &pg->texts[ti];
-            // Escape text (replace newlines and pipes)
             std::string escaped = t->text;
-            for (auto& c : escaped) {
-                if (c == '\n') c = ' ';
-                if (c == '|') c = '-';
-            }
-            ofs << "t " << ti << " x=" << t->x << " y=" << t->y << " fs=" << t->fontSize
-                << " r=" << t->r << " g=" << t->g << " b=" << t->b << " txt=" << escaped << "\n";
+            for (auto& c : escaped) { if (c == '\n') c = ' '; if (c == '|') c = '-'; }
+            fprintf(f, "t %zu x=%g y=%g fs=%g r=%g g=%g b=%g txt=%s\n",
+                    ti, t->x, t->y, t->fontSize, t->r, t->g, t->b, escaped.c_str());
         }
 
         // Save image sources
         for (size_t ii = 0; ii < pg->images.size(); ii++) {
             ImgEl* img = &pg->images[ii];
             if (!img->srcFile.empty()) {
-                ofs << "img " << ii << " x=" << img->x << " y=" << img->y << " w=" << img->w << " h=" << img->h << " src=" << img->srcFile << "\n";
+                fprintf(f, "img %zu x=%g y=%g w=%g h=%g src=%s\n",
+                        ii, img->x, img->y, img->w, img->h, img->srcFile.c_str());
             }
         }
 
         // Save background source
         if (!pg->bgFile.empty()) {
-            ofs << "bg src=" << pg->bgFile << " w=" << pg->bgW << " h=" << pg->bgH << "\n";
+            fprintf(f, "bg src=%s w=%g h=%g\n", pg->bgFile.c_str(), pg->bgW, pg->bgH);
         }
     }
 
-    ofs.close();
-
-    // Check if write actually succeeded
-    if (ofs.fail()) {
-        logInfo("儲存失敗: 寫入錯誤 %s", fn.c_str());
-        return false;
-    }
-
+    fclose(f);
     nd->dirty = 0;
     return true;
 }
@@ -1681,7 +1684,9 @@ static void on_export_pdf(GtkButton*, gpointer) {
             gtk_label_set_text(GTK_LABEL(G.lblStatus), msg);
         }
     } else if (resp == GTK_RESPONSE_ACCEPT) {
-        // === All pages - single PDF file ===
+        // === All pages - single PDF file using cairo's built-in multi-page ===
+        // Use wide filename for Chinese support on Windows
+        std::wstring fn_wide = utf8_to_wide(std::string(fn));
         cairo_surface_t* ps = nullptr;
         cairo_t* cr = nullptr;
 
@@ -1689,18 +1694,17 @@ static void on_export_pdf(GtkButton*, gpointer) {
             PageData* pg = &n->pages[pi];
 
             if (pi == 0) {
+                // First page: create PDF surface
                 ps = cairo_pdf_surface_create(fn, pg->pw, pg->ph);
                 cr = cairo_create(ps);
             } else {
-                cairo_pdf_surface_set_size(ps, pg->pw, pg->ph);
+                // Subsequent pages: flush, resize, and advance
                 cairo_show_page(cr);
+                cairo_pdf_surface_set_size(ps, pg->pw, pg->ph);
             }
 
-            // White background FIRST
-            cairo_set_source_rgb(cr, 1, 1, 1);
-            cairo_paint(cr);
-
-            // Then draw content ON TOP
+            // Draw page content
+            cairo_set_source_rgb(cr, 1, 1, 1); cairo_paint(cr);
             if (pg->bgSurf && cairo_surface_status(pg->bgSurf) == CAIRO_STATUS_SUCCESS) {
                 double sc = fmin(pg->pw / pg->bgW, pg->ph / pg->bgH);
                 double bx = (pg->pw - pg->bgW * sc) / 2, by = (pg->ph - pg->bgH * sc) / 2;
@@ -1760,7 +1764,10 @@ static void on_export_pdf(GtkButton*, gpointer) {
             else
                 snprintf(pageFn, sizeof(pageFn), "%s.pdf", base.c_str());
 
-            cairo_surface_t* ps = cairo_pdf_surface_create(pageFn, pg->pw, pg->ph);
+            std::wstring pageFn_wide = utf8_to_wide(std::string(pageFn));
+            FILE* f = _wfopen(pageFn_wide.c_str(), L"wb");
+            if (!f) continue;
+            cairo_surface_t* ps = cairo_pdf_surface_create_for_stream(nullptr, f, pg->pw, pg->ph);
             cairo_t* cr = cairo_create(ps);
             cairo_set_source_rgb(cr, 1, 1, 1); cairo_paint(cr);
             if (pg->bgSurf && cairo_surface_status(pg->bgSurf) == CAIRO_STATUS_SUCCESS) {
@@ -1905,6 +1912,7 @@ static void on_export_png(GtkButton*, gpointer) {
             else
                 snprintf(pageFn, sizeof(pageFn), "%s.png", base.c_str());
 
+            std::wstring pageFn_wide = utf8_to_wide(std::string(pageFn));
             int pw = (int)(pg->pw), ph = (int)(pg->ph);
             cairo_surface_t* ps = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, pw, ph);
             cairo_t* cr = cairo_create(ps);
@@ -1973,44 +1981,36 @@ static void on_export_note(GtkButton*, gpointer) {
             std::string target(fn);
             if (target.size() < 6 || target.substr(target.size() - 6) != ".onote") target += ".onote";
 
-            // Write directly to target
-            std::ofstream ofs(target, std::ios::binary);
-            if (ofs.is_open()) {
-                ofs << "# OfflineNote v1\n";
-                ofs << "name=" << n->name << "\n";
-                ofs << "pages=" << n->pages.size() << "\n";
+            // Write directly using FILE* for wide path support
+            FILE* f = wfopen_utf8(target, L"wb");
+            if (f) {
+                fprintf(f, "# OfflineNote v1\nname=%s\npages=%zu\n", n->name.c_str(), n->pages.size());
                 for (size_t pi = 0; pi < n->pages.size(); pi++) {
                     PageData* pg = &n->pages[pi];
-                    ofs << "[page " << pi << "]\n";
-                    ofs << "pw=" << pg->pw << "\nph=" << pg->ph << "\n";
-                    ofs << "strokes=" << pg->strokes.size() << "\n";
-                    ofs << "images=" << pg->images.size() << "\n";
-                    ofs << "texts=" << pg->texts.size() << "\n";
+                    fprintf(f, "[page %zu]\npw=%g\nph=%g\nstrokes=%zu\nimages=%zu\ntexts=%zu\n",
+                            pi, pg->pw, pg->ph, pg->strokes.size(), pg->images.size(), pg->texts.size());
                     for (auto& s : pg->strokes) {
-                        ofs << "s 0 w=" << s.w << " r=" << s.r << " g=" << s.g << " b=" << s.b << " a=" << s.a << " t=" << s.tool << "\n";
+                        fprintf(f, "s 0 w=%g r=%g g=%g b=%g a=%g t=%d\n", s.w, s.r, s.g, s.b, s.a, s.tool);
                         for (size_t j = 0; j < s.x.size(); j++)
-                            ofs << "p " << s.x[j] << " " << s.y[j] << "\n";
+                            fprintf(f, "p %g %g\n", s.x[j], s.y[j]);
                     }
                     for (auto& t : pg->texts) {
                         std::string esc = t.text;
                         for (auto& c : esc) { if (c == '\n') c = ' '; if (c == '|') c = '-'; }
-                        ofs << "t 0 x=" << t.x << " y=" << t.y << " fs=" << t.fontSize
-                            << " r=" << t.r << " g=" << t.g << " b=" << t.b << " txt=" << esc << "\n";
+                        fprintf(f, "t 0 x=%g y=%g fs=%g r=%g g=%g b=%g txt=%s\n",
+                                t.x, t.y, t.fontSize, t.r, t.g, t.b, esc.c_str());
                     }
                     for (auto& img : pg->images) {
                         if (!img.srcFile.empty())
-                            ofs << "img 0 x=" << img.x << " y=" << img.y << " w=" << img.w << " h=" << img.h << " src=" << img.srcFile << "\n";
+                            fprintf(f, "img 0 x=%g y=%g w=%g h=%g src=%s\n",
+                                    img.x, img.y, img.w, img.h, img.srcFile.c_str());
                     }
                     if (!pg->bgFile.empty())
-                        ofs << "bg src=" << pg->bgFile << " w=" << pg->bgW << " h=" << pg->bgH << "\n";
+                        fprintf(f, "bg src=%s w=%g h=%g\n", pg->bgFile.c_str(), pg->bgW, pg->bgH);
                 }
-                ofs.close();
-                if (!ofs.fail()) {
-                    logInfo("已匯出筆記: %s", target.c_str());
-                    gtk_label_set_text(GTK_LABEL(G.lblStatus), "已匯出筆記");
-                } else {
-                    logInfo("匯出失敗: 寫入錯誤");
-                }
+                fclose(f);
+                logInfo("已匯出筆記: %s", target.c_str());
+                gtk_label_set_text(GTK_LABEL(G.lblStatus), "已匯出筆記");
             } else {
                 logInfo("匯出失敗: 無法建立 %s", target.c_str());
             }
@@ -2048,39 +2048,35 @@ static void on_batch_export(GtkButton*, gpointer) {
                 }
                 std::string target = targetDir + "/" + fn + ".onote";
 
-                // Write directly to target (no intermediate save)
-                std::ofstream ofs(target, std::ios::binary);
-                if (ofs.is_open()) {
-                    ofs << "# OfflineNote v1\n";
-                    ofs << "name=" << nd->name << "\n";
-                    ofs << "pages=" << nd->pages.size() << "\n";
+                // Write directly using FILE* for wide path support
+                FILE* f = wfopen_utf8(target, L"wb");
+                if (f) {
+                    fprintf(f, "# OfflineNote v1\nname=%s\npages=%zu\n", nd->name.c_str(), nd->pages.size());
                     for (size_t pi = 0; pi < nd->pages.size(); pi++) {
                         PageData* pg = &nd->pages[pi];
-                        ofs << "[page " << pi << "]\n";
-                        ofs << "pw=" << pg->pw << "\nph=" << pg->ph << "\n";
-                        ofs << "strokes=" << pg->strokes.size() << "\n";
-                        ofs << "images=" << pg->images.size() << "\n";
-                        ofs << "texts=" << pg->texts.size() << "\n";
+                        fprintf(f, "[page %zu]\npw=%g\nph=%g\nstrokes=%zu\nimages=%zu\ntexts=%zu\n",
+                                pi, pg->pw, pg->ph, pg->strokes.size(), pg->images.size(), pg->texts.size());
                         for (auto& s : pg->strokes) {
-                            ofs << "s 0 w=" << s.w << " r=" << s.r << " g=" << s.g << " b=" << s.b << " a=" << s.a << " t=" << s.tool << "\n";
+                            fprintf(f, "s 0 w=%g r=%g g=%g b=%g a=%g t=%d\n", s.w, s.r, s.g, s.b, s.a, s.tool);
                             for (size_t j = 0; j < s.x.size(); j++)
-                                ofs << "p " << s.x[j] << " " << s.y[j] << "\n";
+                                fprintf(f, "p %g %g\n", s.x[j], s.y[j]);
                         }
                         for (auto& t : pg->texts) {
                             std::string esc = t.text;
                             for (auto& c : esc) { if (c == '\n') c = ' '; if (c == '|') c = '-'; }
-                            ofs << "t 0 x=" << t.x << " y=" << t.y << " fs=" << t.fontSize
-                                << " r=" << t.r << " g=" << t.g << " b=" << t.b << " txt=" << esc << "\n";
+                            fprintf(f, "t 0 x=%g y=%g fs=%g r=%g g=%g b=%g txt=%s\n",
+                                    t.x, t.y, t.fontSize, t.r, t.g, t.b, esc.c_str());
                         }
                         for (auto& img : pg->images) {
                             if (!img.srcFile.empty())
-                                ofs << "img 0 x=" << img.x << " y=" << img.y << " w=" << img.w << " h=" << img.h << " src=" << img.srcFile << "\n";
+                                fprintf(f, "img 0 x=%g y=%g w=%g h=%g src=%s\n",
+                                        img.x, img.y, img.w, img.h, img.srcFile.c_str());
                         }
                         if (!pg->bgFile.empty())
-                            ofs << "bg src=" << pg->bgFile << " w=" << pg->bgW << " h=" << pg->bgH << "\n";
+                            fprintf(f, "bg src=%s w=%g h=%g\n", pg->bgFile.c_str(), pg->bgW, pg->bgH);
                     }
-                    ofs.close();
-                    if (!ofs.fail()) { exported++; continue; }
+                    fclose(f);
+                    exported++; continue;
                 }
                 failed++;
                 if (!failedNames.empty()) failedNames += ", ";
