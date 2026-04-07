@@ -36,13 +36,14 @@ struct StrokeData {
 struct ImgEl {
     cairo_surface_t* surf = nullptr;
     double x = 50, y = 50, w = 200, h = 150;
+    int rotateAngle = 0;  // 0, 90, 180, 270
     std::string srcFile; // keep source for reload
     ~ImgEl() { if(surf) cairo_surface_destroy(surf); }
     ImgEl() = default;
-    ImgEl(ImgEl&& o) noexcept : surf(o.surf),x(o.x),y(o.y),w(o.w),h(o.h),srcFile(std::move(o.srcFile)) { o.surf=nullptr; }
+    ImgEl(ImgEl&& o) noexcept : surf(o.surf),x(o.x),y(o.y),w(o.w),h(o.h),rotateAngle(o.rotateAngle),srcFile(std::move(o.srcFile)) { o.surf=nullptr; }
     ImgEl& operator=(ImgEl&& o) noexcept {
         if(surf)cairo_surface_destroy(surf);
-        surf=o.surf;x=o.x;y=o.y;w=o.w;h=o.h;srcFile=std::move(o.srcFile);o.surf=nullptr;return *this;
+        surf=o.surf;x=o.x;y=o.y;w=o.w;h=o.h;rotateAngle=o.rotateAngle;srcFile=std::move(o.srcFile);o.surf=nullptr;return *this;
     }
     ImgEl(const ImgEl&) = delete;
     ImgEl& operator=(const ImgEl&) = delete;
@@ -61,17 +62,18 @@ struct PageData {
     double bgW = 0, bgH = 0;
     std::string bgFile;
     double pw = 595, ph = 842;
+    int pdfPageNum = -1;         // 若來自 PDF，記錄原始頁碼
     ~PageData() { if(bgSurf) cairo_surface_destroy(bgSurf); }
     PageData() = default;
     PageData(PageData&& o) noexcept
         : strokes(std::move(o.strokes)), images(std::move(o.images)),
           texts(std::move(o.texts)), bgSurf(o.bgSurf), bgW(o.bgW), bgH(o.bgH),
-          bgFile(std::move(o.bgFile)), pw(o.pw), ph(o.ph) { o.bgSurf = nullptr; }
+          bgFile(std::move(o.bgFile)), pw(o.pw), ph(o.ph), pdfPageNum(o.pdfPageNum) { o.bgSurf = nullptr; }
     PageData& operator=(PageData&& o) noexcept {
         if(bgSurf)cairo_surface_destroy(bgSurf);
         strokes=std::move(o.strokes);images=std::move(o.images);
         texts=std::move(o.texts);bgSurf=o.bgSurf;bgW=o.bgW;bgH=o.bgH;
-        bgFile=std::move(o.bgFile);pw=o.pw;ph=o.ph;o.bgSurf=nullptr;return *this;
+        bgFile=std::move(o.bgFile);pw=o.pw;ph=o.ph;pdfPageNum=o.pdfPageNum;o.bgSurf=nullptr;return *this;
     }
     PageData(const PageData&) = delete;
     PageData& operator=(const PageData&) = delete;
@@ -91,6 +93,10 @@ static struct {
     GtkWidget* drawingArea = nullptr;
     cairo_surface_t* canvasSurf = nullptr;
     GtkWidget* noteList = nullptr;
+    GtkWidget* searchEntry = nullptr;      // 搜尋框
+    std::string searchTerm;               // 當前搜尋关键词
+    GtkWidget* pageThumbs = nullptr;     // 縮圖側欄
+    std::vector<cairo_surface_t*> pageThumbSurf;  // 縮圖 surface
     GtkWidget* lblZoom = nullptr;
     GtkWidget* lblPage = nullptr;
     GtkWidget* lblStatus = nullptr;
@@ -120,12 +126,20 @@ static struct {
     int dragging = 0, resizing = 0;
     double dragOffX = 0, dragOffY = 0, selResizeW = 0, selResizeH = 0;
     double selResizeOrigW = 0, selResizeOrigH = 0; // For bg resize
+    double imgRotateAngle = 0;  // 圖片旋轉角度（0, 90, 180, 270）
     double pageScrollY = 0; // Vertical scroll offset when zoomed
     double pageScrollX = 0; // Horizontal scroll offset when zoomed
 
     // Auto-save
     guint autoSaveTimer = 0;
     bool shuttingDown = false;
+
+    // Undo/Redo stacks
+    std::vector<std::string> undoStack;
+    std::vector<std::string> redoStack;
+
+    // Crash recovery
+    std::string crashRecoveryFile;
 
     AppController* ctrl = nullptr;
 } G;
@@ -142,6 +156,13 @@ static const char* TOOL_NAMES[] = {
 // Forward declarations
 // ============================================================
 static void renderCanvas();
+static void rebuildThumbs();
+static std::string serializeNote(const NoteData* nd);
+static void deserializeNoteToCurrent(const std::string& data);
+static void on_undo(GtkButton*, gpointer);
+static void on_redo(GtkButton*, gpointer);
+static void pushUndo();
+static FILE* wfopen_utf8(const std::string& path_utf8, const wchar_t* mode);
 static void hideTextEntry();
 static void on_note_rename(GtkMenuItem*, gpointer);
 static void on_note_delete(GtkMenuItem*, gpointer);
@@ -179,6 +200,17 @@ static std::string sanitize_resource_path(const std::string& path) {
 // ============================================================
 static NoteData* curNote() {
     return (G.selNote >= 0 && G.selNote < (int)G.notes.size()) ? &G.notes[G.selNote] : nullptr;
+}
+
+static std::string serializeCurrentNote() { return serializeNote(curNote()); }
+
+static void pushUndo() {
+    std::string snap = serializeCurrentNote();
+    if (!snap.empty()) {
+        G.undoStack.push_back(snap);
+        if (G.undoStack.size() > 50) G.undoStack.erase(G.undoStack.begin());
+        G.redoStack.clear();
+    }
 }
 static PageData* curPage() {
     NoteData* n = curNote();
@@ -233,6 +265,18 @@ static gboolean auto_save_callback(gpointer) {
     }
     if (saved > 0) {
         logInfo("Auto-saved %d notes", saved);
+        // Also save crash recovery snapshot (current note)
+        NoteData* cur = curNote();
+        if (cur && !G.crashRecoveryFile.empty()) {
+            std::string snap = serializeNote(cur);
+            if (!snap.empty()) {
+                FILE* f = wfopen_utf8(G.crashRecoveryFile, L"wb");
+                if (f) {
+                    fprintf(f, "%s", snap.c_str());
+                    fclose(f);
+                }
+            }
+        }
     }
     return TRUE; // keep running
 }
@@ -464,6 +508,14 @@ static void renderCanvas() {
 
         cairo_save(cr);
         cairo_translate(cr, ix, iy);
+
+        // Apply rotation if set
+        if (img->rotateAngle != 0) {
+            cairo_translate(cr, iw/2.0, ih/2.0);  // Move to center
+            cairo_rotate(cr, img->rotateAngle * G_PI / 180.0);
+            cairo_translate(cr, -iw/2.0, -ih/2.0);  // Move back
+        }
+
         cairo_scale(cr, sx, sy);
         cairo_set_source_surface(cr, img->surf, 0, 0);
         cairo_paint(cr);
@@ -768,6 +820,9 @@ static gboolean on_btnrelease(GtkWidget*, GdkEventButton*, gpointer) {
     G.drawing = 0;
     G.dragging = 0;
     G.resizing = 0;
+    // Save state after any mouse interaction completes
+    pushUndo();
+    NoteData* n=curNote();if(n)n->dirty=1;
     return TRUE;
 }
 
@@ -1007,11 +1062,12 @@ static gboolean on_keypress(GtkWidget*, GdkEventKey* ev, gpointer) {
 
     // Ctrl+Z = Undo
     if ((ev->keyval == GDK_KEY_z || ev->keyval == GDK_KEY_Z) && (ev->state & GDK_CONTROL_MASK)) {
-        if (!pg->strokes.empty()) {
-            pg->strokes.pop_back();
-            NoteData* n=curNote(); if(n)n->dirty=1;
-            renderCanvas(); updateStatus();
-        }
+        on_undo(nullptr, nullptr);
+        return TRUE;
+    }
+    // Ctrl+Y = Redo
+    if ((ev->keyval == GDK_KEY_y || ev->keyval == GDK_KEY_Y) && (ev->state & GDK_CONTROL_MASK)) {
+        on_redo(nullptr, nullptr);
         return TRUE;
     }
 
@@ -1019,6 +1075,44 @@ static gboolean on_keypress(GtkWidget*, GdkEventKey* ev, gpointer) {
     if ((ev->keyval == GDK_KEY_s || ev->keyval == GDK_KEY_S) && (ev->state & GDK_CONTROL_MASK)) {
         on_save(nullptr, nullptr);
         return TRUE;
+    }
+
+    // R = Rotate selected image 90 degrees clockwise
+    if (ev->keyval == GDK_KEY_r || ev->keyval == GDK_KEY_R) {
+        PageData* pg = curPage();
+        if (pg && G.selImg >= 0 && G.selImg < (int)pg->images.size()) {
+            pushUndo();
+            ImgEl* img = &pg->images[G.selImg];
+            img->rotateAngle = (img->rotateAngle + 90) % 360;
+            // Swap w/h on 90/270 degree rotation
+            if (img->rotateAngle == 90 || img->rotateAngle == 270) {
+                double tmp = img->w; img->w = img->h; img->h = tmp;
+            }
+            NoteData* n = curNote(); if(n) n->dirty = 1;
+            if (G.canvasSurf) { cairo_surface_destroy(G.canvasSurf); G.canvasSurf = nullptr; }
+            renderCanvas(); updateStatus(); rebuildThumbs();
+            return TRUE;
+        }
+    }
+
+    // C = Crop selected image (simple: halve width and height)
+    if (ev->keyval == GDK_KEY_c || ev->keyval == GDK_KEY_C) {
+        PageData* pg = curPage();
+        if (pg && G.selImg >= 0 && G.selImg < (int)pg->images.size()) {
+            pushUndo();
+            ImgEl* img = &pg->images[G.selImg];
+            // Simple crop: keep center half
+            double newW = img->w / 2.0;
+            double newH = img->h / 2.0;
+            img->x += (img->w - newW) / 2.0;
+            img->y += (img->h - newH) / 2.0;
+            img->w = newW;
+            img->h = newH;
+            NoteData* n = curNote(); if(n) n->dirty = 1;
+            if (G.canvasSurf) { cairo_surface_destroy(G.canvasSurf); G.canvasSurf = nullptr; }
+            renderCanvas(); updateStatus(); rebuildThumbs();
+            return TRUE;
+        }
     }
 
     // Delete
@@ -1089,14 +1183,59 @@ static void on_zoomfit(GtkButton*, gpointer) {
     renderCanvas(); updateStatus();
 }
 static void on_undo(GtkButton*, gpointer) {
-    PageData* pg=curPage();
-    if(pg && !pg->strokes.empty()){pg->strokes.pop_back();NoteData* n=curNote();if(n)n->dirty=1;renderCanvas();updateStatus();}
+    NoteData* n = curNote();
+    if (!n || n->pages.empty()) return;
+    if (G.undoStack.empty()) return;
+
+    // Save current state for redo
+    std::string redoData = serializeCurrentNote();
+    G.redoStack.push_back(redoData);
+
+    // Restore from undo stack
+    std::string prevState = G.undoStack.back();
+    G.undoStack.pop_back();
+
+    deserializeNoteToCurrent(prevState);
+    n->dirty = 1;
+    if (G.canvasSurf) { cairo_surface_destroy(G.canvasSurf); G.canvasSurf = nullptr; }
+    renderCanvas(); updateStatus(); rebuildThumbs();
+}
+
+static void on_redo(GtkButton*, gpointer) {
+    NoteData* n = curNote();
+    if (!n || n->pages.empty()) return;
+    if (G.redoStack.empty()) return;
+
+    // Save current state for undo
+    std::string undoData = serializeCurrentNote();
+    G.undoStack.push_back(undoData);
+
+    // Restore from redo stack
+    std::string prevState = G.redoStack.back();
+    G.redoStack.pop_back();
+
+    deserializeNoteToCurrent(prevState);
+    n->dirty = 1;
+    if (G.canvasSurf) { cairo_surface_destroy(G.canvasSurf); G.canvasSurf = nullptr; }
+    renderCanvas(); updateStatus(); rebuildThumbs();
 }
 static void on_del(GtkButton*, gpointer) {
     PageData* pg=curPage(); if(!pg) return;
-    if(G.selImg>=0 && G.selImg<(int)pg->images.size()){pg->images.erase(pg->images.begin()+G.selImg);G.selImg=-1;NoteData* n=curNote();if(n)n->dirty=1;renderCanvas();updateStatus();}
-    else if(G.selTxt>=0 && G.selTxt<(int)pg->texts.size()){pg->texts.erase(pg->texts.begin()+G.selTxt);G.selTxt=-1;NoteData* n=curNote();if(n)n->dirty=1;renderCanvas();updateStatus();}
-    else if(!pg->strokes.empty()){pg->strokes.pop_back();NoteData* n=curNote();if(n)n->dirty=1;renderCanvas();updateStatus();}
+    if(G.selImg>=0 && G.selImg<(int)pg->images.size()){
+        pushUndo();
+        pg->images.erase(pg->images.begin()+G.selImg);G.selImg=-1;
+        NoteData* n=curNote();if(n)n->dirty=1;renderCanvas();updateStatus();rebuildThumbs();
+    }
+    else if(G.selTxt>=0 && G.selTxt<(int)pg->texts.size()){
+        pushUndo();
+        pg->texts.erase(pg->texts.begin()+G.selTxt);G.selTxt=-1;
+        NoteData* n=curNote();if(n)n->dirty=1;renderCanvas();updateStatus();rebuildThumbs();
+    }
+    else if(!pg->strokes.empty()){
+        pushUndo();
+        pg->strokes.pop_back();
+        NoteData* n=curNote();if(n)n->dirty=1;renderCanvas();updateStatus();rebuildThumbs();
+    }
 }
 
 // ============================================================
@@ -1118,6 +1257,28 @@ static void rebuildNoteList() {
     if (!G.noteList) return;
     gtk_container_foreach(GTK_CONTAINER(G.noteList), (GtkCallback)gtk_widget_destroy, nullptr);
     for (size_t i = 0; i < G.notes.size(); i++) {
+        // 搜尋過濾
+        if (!G.searchTerm.empty()) {
+            std::string nameLower = G.notes[i].name;
+            std::string searchLower = G.searchTerm;
+            // 轉小寫比較
+            for (auto& c : nameLower) c = tolower(c);
+            for (auto& c : searchLower) c = tolower(c);
+            bool match = nameLower.find(searchLower) != std::string::npos;
+            // 也搜尋內容
+            if (!match) {
+                for (auto& pg : G.notes[i].pages) {
+                    for (auto& t : pg.texts) {
+                        std::string txtLower = t.text;
+                        for (auto& c : txtLower) c = tolower(c);
+                        if (txtLower.find(searchLower) != std::string::npos) { match = true; break; }
+                    }
+                    if (match) break;
+                }
+            }
+            if (!match) continue;  // 跳過不符合的筆記
+        }
+
         GtkWidget* row = gtk_list_box_row_new();
         GtkWidget* hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
         gtk_container_set_border_width(GTK_CONTAINER(hbox), 4);
@@ -1153,6 +1314,131 @@ static void rebuildNoteList() {
         }
         g_object_set_data(G_OBJECT(row), "idx", GINT_TO_POINTER(i));
         gtk_list_box_insert(GTK_LIST_BOX(G.noteList), row, -1);
+    }
+}
+
+// ── Page Thumbnails ──
+static void on_thumb_activated(GtkListBox*, GtkListBoxRow* row, gpointer) {
+    int idx = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(row), "idx"));
+    if (idx >= 0 && curNote()) {
+        G.selPage = idx;
+        if (G.canvasSurf) { cairo_surface_destroy(G.canvasSurf); G.canvasSurf = nullptr; }
+        renderCanvas(); updateStatus(); rebuildThumbs();
+    }
+}
+
+// ── Search ──
+static void on_search_changed(GtkSearchEntry*, gpointer) {
+    const char* text = gtk_entry_get_text(GTK_ENTRY(G.searchEntry));
+    G.searchTerm = text ? text : "";
+    rebuildNoteList();
+}
+
+static cairo_surface_t* buildThumbSurface(PageData* pg, int thumbW) {
+    if (!pg) return nullptr;
+    double scale = (double)thumbW / pg->pw;
+    int thumbH = (int)(pg->ph * scale);
+
+    cairo_surface_t* surf = cairo_image_surface_create(CAIRO_FORMAT_RGB24, thumbW, thumbH);
+    cairo_t* cr = cairo_create(surf);
+
+    // 白色背景
+    cairo_set_source_rgb(cr, 1.0, 1.0, 1.0);
+    cairo_rectangle(cr, 0, 0, thumbW, thumbH);
+    cairo_fill(cr);
+
+    cairo_scale(cr, scale, scale);
+
+    // 渲染背景
+    if (pg->bgSurf) {
+        cairo_save(cr);
+        cairo_set_source_surface(cr, pg->bgSurf, 0, 0);
+        cairo_paint(cr);
+        cairo_restore(cr);
+    }
+
+    // 簡化渲染：只渲染筆劃
+    for (auto& s : pg->strokes) {
+        if (s.x.size() < 2) continue;
+        cairo_save(cr);
+        cairo_set_source_rgba(cr, s.r, s.g, s.b, s.a);
+        cairo_set_line_width(cr, s.w);
+        cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+        cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+        cairo_move_to(cr, s.x[0], s.y[0]);
+        for (size_t i = 1; i < s.x.size(); i++)
+            cairo_line_to(cr, s.x[i], s.y[i]);
+        cairo_stroke(cr);
+        cairo_restore(cr);
+    }
+
+    // 邊框
+    cairo_set_source_rgb(cr, 0.7, 0.7, 0.7);
+    cairo_set_line_width(cr, 1.0 / scale);
+    cairo_rectangle(cr, 0, 0, pg->pw, pg->ph);
+    cairo_stroke(cr);
+
+    cairo_destroy(cr);
+    return surf;
+}
+
+static void rebuildThumbs() {
+    if (!G.pageThumbs) return;
+    gtk_container_foreach(GTK_CONTAINER(G.pageThumbs), (GtkCallback)gtk_widget_destroy, nullptr);
+
+    // 清理舊縮圖 surface
+    for (auto* s : G.pageThumbSurf) { if (s) cairo_surface_destroy(s); }
+    G.pageThumbSurf.clear();
+
+    NoteData* n = curNote();
+    if (!n) return;
+
+    int thumbW = 130;
+    for (size_t i = 0; i < n->pages.size(); i++) {
+        PageData* pg = &n->pages[i];
+        cairo_surface_t* thumbSurf = buildThumbSurface(pg, thumbW);
+        G.pageThumbSurf.push_back(thumbSurf);
+
+        GtkWidget* row = gtk_list_box_row_new();
+        GtkWidget* box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+        gtk_container_set_border_width(GTK_CONTAINER(box), 4);
+
+        if (thumbSurf) {
+            int w = cairo_image_surface_get_width(thumbSurf);
+            int h = cairo_image_surface_get_height(thumbSurf);
+            GtkWidget* da = gtk_drawing_area_new();
+            gtk_widget_set_size_request(da, w, h);
+
+            g_object_set_data(G_OBJECT(da), "thumb-surf", thumbSurf);
+            g_signal_connect(da, "draw", G_CALLBACK(+[](GtkWidget* widget, cairo_t* cr, gpointer) -> gboolean {
+                cairo_surface_t* surf = (cairo_surface_t*)g_object_get_data(G_OBJECT(widget), "thumb-surf");
+                if (surf) {
+                    cairo_set_source_surface(cr, surf, 0, 0);
+                    cairo_paint(cr);
+                }
+                return TRUE;
+            }), nullptr);
+
+            gtk_box_pack_start(GTK_BOX(box), da, FALSE, FALSE, 0);
+        }
+
+        GtkWidget* lbl = gtk_label_new("");
+        char pageLbl[32];
+        snprintf(pageLbl, sizeof(pageLbl), "P%zu%s", i + 1,
+            (int)i == G.selPage ? " ◀" : "");
+        gtk_label_set_text(GTK_LABEL(lbl), pageLbl);
+        gtk_widget_set_halign(lbl, GTK_ALIGN_CENTER);
+        gtk_box_pack_start(GTK_BOX(box), lbl, FALSE, FALSE, 0);
+
+        gtk_container_add(GTK_CONTAINER(row), box);
+        gtk_widget_show_all(row);
+
+        if ((int)i == G.selPage) {
+            GtkStyleContext* rsc = gtk_widget_get_style_context(row);
+            gtk_style_context_add_class(rsc, GTK_STYLE_CLASS_SUGGESTED_ACTION);
+        }
+        g_object_set_data(G_OBJECT(row), "idx", GINT_TO_POINTER(i));
+        gtk_list_box_insert(GTK_LIST_BOX(G.pageThumbs), row, -1);
     }
 }
 
@@ -1238,7 +1524,7 @@ static void on_note_delete(GtkMenuItem*, gpointer user_data) {
             G.selNote--;
         }
         if (G.canvasSurf) { cairo_surface_destroy(G.canvasSurf); G.canvasSurf = nullptr; }
-        rebuildNoteList(); renderCanvas(); updateStatus();
+        rebuildNoteList(); renderCanvas(); updateStatus(); rebuildThumbs();
         logInfo("已刪除筆記");
     }
 }
@@ -1308,7 +1594,7 @@ static void on_newnote(GtkButton*, gpointer) {
         nd->pages.back().ph = landscape ? 595 : 842;
         G.selNote = (int)G.notes.size() - 1; G.selPage = 0;
         if (G.canvasSurf) { cairo_surface_destroy(G.canvasSurf); G.canvasSurf = nullptr; }
-        rebuildNoteList(); renderCanvas(); updateStatus();
+        rebuildNoteList(); renderCanvas(); updateStatus(); rebuildThumbs();
     }
     gtk_widget_destroy(dlg);
 }
@@ -1442,7 +1728,179 @@ static std::string get_exe_dir() {
     return ".";
 }
 
-// Simple text-based serialization using FILE* for wide path support
+// ── Undo/Redo: Serialize/Deserialize to string ──
+static std::string serializeNote(const NoteData* nd) {
+    if (!nd) return "";
+    std::string out;
+    char buf[4096];
+    out += "# OfflineNote undo\n";
+    snprintf(buf, sizeof(buf), "name=%s\n", nd->name.c_str()); out += buf;
+    snprintf(buf, sizeof(buf), "pages=%zu\n", nd->pages.size()); out += buf;
+
+    for (size_t pi = 0; pi < nd->pages.size(); pi++) {
+        const PageData* pg = &nd->pages[pi];
+        snprintf(buf, sizeof(buf), "[page %zu]\n", pi); out += buf;
+        snprintf(buf, sizeof(buf), "pw=%g\nph=%g\n", pg->pw, pg->ph); out += buf;
+
+        for (size_t si = 0; si < pg->strokes.size(); si++) {
+            const StrokeData* s = &pg->strokes[si];
+            snprintf(buf, sizeof(buf), "s %zu w=%g r=%g g=%g b=%g a=%g t=%d\n", si, s->w, s->r, s->g, s->b, s->a, s->tool);
+            out += buf;
+            for (size_t pt = 0; pt < s->x.size(); pt++) {
+                snprintf(buf, sizeof(buf), "p %g %g\n", s->x[pt], s->y[pt]); out += buf;
+            }
+        }
+
+        for (size_t ti = 0; ti < pg->texts.size(); ti++) {
+            const TxtEl* t = &pg->texts[ti];
+            std::string esc = t->text;
+            for (auto& c : esc) { if (c == '\n') c = ' '; if (c == '|') c = '-'; }
+            snprintf(buf, sizeof(buf), "t %zu x=%g y=%g fs=%g r=%g g=%g b=%g txt=%s\n", ti, t->x, t->y, t->fontSize, t->r, t->g, t->b, esc.c_str());
+            out += buf;
+        }
+
+        for (size_t ii = 0; ii < pg->images.size(); ii++) {
+            const ImgEl* img = &pg->images[ii];
+            if (!img->srcFile.empty()) {
+                snprintf(buf, sizeof(buf), "img %zu x=%g y=%g w=%g h=%g src=%s\n", ii, img->x, img->y, img->w, img->h, img->srcFile.c_str());
+                out += buf;
+            }
+        }
+
+        if (!pg->bgFile.empty()) {
+            snprintf(buf, sizeof(buf), "bg src=%s w=%g h=%g\n", pg->bgFile.c_str(), pg->bgW, pg->bgH);
+            out += buf;
+        }
+    }
+    return out;
+}
+
+static void deserializeNoteToCurrent(const std::string& data) {
+    NoteData* nd = curNote();
+    if (!nd || data.empty()) return;
+
+    // Parse the serialized data back into the current note
+    nd->pages.clear();
+    nd->name = "";
+
+    std::istringstream ss(data);
+    std::string line;
+    int curPage = -1;
+    StrokeData* curStroke = nullptr;
+
+    while (std::getline(ss, line)) {
+        if (line.empty() || line[0] == '#' || line.substr(0, 5) == "name=") {
+            if (line.substr(0, 5) == "name=") nd->name = line.substr(5);
+            continue;
+        }
+        if (line.substr(0, 6) == "pages=") continue;
+
+        if (line.substr(0, 6) == "[page ") {
+            curPage++;
+            nd->pages.push_back(PageData());
+            continue;
+        }
+
+        if (curPage >= 0 && curPage < (int)nd->pages.size()) {
+            PageData* pg = &nd->pages[curPage];
+            if (line.substr(0, 3) == "pw=") { pg->pw = atof(line.c_str()+3); continue; }
+            if (line.substr(0, 3) == "ph=") { pg->ph = atof(line.c_str()+3); continue; }
+
+            if (line.substr(0, 2) == "s ") {
+                pg->strokes.push_back(StrokeData());
+                curStroke = &pg->strokes.back();
+                char* str = (char*)line.c_str();
+                char* tok;
+                tok = strstr(str, "w="); if(tok) curStroke->w = atof(tok+2);
+                tok = strstr(str, "r="); if(tok) curStroke->r = atof(tok+2);
+                tok = strstr(str, "g="); if(tok) curStroke->g = atof(tok+2);
+                tok = strstr(str, "b="); if(tok) curStroke->b = atof(tok+2);
+                tok = strstr(str, "a="); if(tok) curStroke->a = atof(tok+2);
+                tok = strstr(str, "t="); if(tok) curStroke->tool = atoi(tok+2);
+                continue;
+            }
+
+            if (line[0] == 'p' && line[1] == ' ' && curStroke) {
+                double x, y;
+                if (sscanf(line.c_str()+2, "%lf %lf", &x, &y) == 2)
+                    curStroke->addPt(x, y);
+                continue;
+            }
+
+            if (line.substr(0, 2) == "t ") {
+                pg->texts.push_back(TxtEl());
+                TxtEl* t = &pg->texts.back();
+                char* tok;
+                tok = strstr((char*)line.c_str(), "x="); if(tok) t->x = atof(tok+2);
+                tok = strstr((char*)line.c_str(), "y="); if(tok) t->y = atof(tok+2);
+                tok = strstr((char*)line.c_str(), "fs="); if(tok) t->fontSize = atof(tok+3);
+                tok = strstr((char*)line.c_str(), "r="); if(tok) t->r = atof(tok+2);
+                tok = strstr((char*)line.c_str(), "g="); if(tok) t->g = atof(tok+2);
+                tok = strstr((char*)line.c_str(), "b="); if(tok) t->b = atof(tok+2);
+                tok = strstr((char*)line.c_str(), "txt="); if(tok) t->text = tok+4;
+                continue;
+            }
+
+            if (line.substr(0, 4) == "img ") {
+                pg->images.push_back(ImgEl());
+                ImgEl* img = &pg->images.back();
+                char* tok;
+                tok = strstr((char*)line.c_str(), "x="); if(tok) img->x = atof(tok+2);
+                tok = strstr((char*)line.c_str(), "y="); if(tok) img->y = atof(tok+2);
+                tok = strstr((char*)line.c_str(), "w="); if(tok) img->w = atof(tok+2);
+                tok = strstr((char*)line.c_str(), "h="); if(tok) img->h = atof(tok+2);
+                tok = strstr((char*)line.c_str(), "src="); if(tok) img->srcFile = tok+4;
+                continue;
+            }
+
+            if (line.substr(0, 3) == "bg ") {
+                char* tok = strstr((char*)line.c_str(), "src=");
+                if (tok) {
+                    pg->bgFile = tok + 4;
+                    tok = strstr((char*)line.c_str(), "w="); if(tok) pg->bgW = atof(tok+2);
+                    tok = strstr((char*)line.c_str(), "h="); if(tok) pg->bgH = atof(tok+2);
+                }
+                continue;
+            }
+        }
+    }
+
+    // Reload images/backgrounds from disk
+    std::string saveDir = get_save_dir();
+    for (auto& pg : nd->pages) {
+        for (auto& img : pg.images) {
+            std::string fullPath = saveDir + "/" + img.srcFile;
+            GError* err = nullptr;
+            GdkPixbuf* pb = gdk_pixbuf_new_from_file(fullPath.c_str(), &err);
+            if (pb) {
+                int w = gdk_pixbuf_get_width(pb), h = gdk_pixbuf_get_height(pb);
+                cairo_surface_t* surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+                cairo_t* cr = cairo_create(surf);
+                gdk_cairo_set_source_pixbuf(cr, pb, 0, 0);
+                cairo_paint(cr);
+                cairo_destroy(cr);
+                g_object_unref(pb);
+                img.surf = surf;
+            } else { if (err) g_error_free(err); }
+        }
+        if (!pg.bgFile.empty()) {
+            std::string fullPath = saveDir + "/" + pg.bgFile;
+            GError* err = nullptr;
+            GdkPixbuf* pb = gdk_pixbuf_new_from_file(fullPath.c_str(), &err);
+            if (pb) {
+                int w = gdk_pixbuf_get_width(pb), h = gdk_pixbuf_get_height(pb);
+                cairo_surface_t* surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+                cairo_t* cr = cairo_create(surf);
+                gdk_cairo_set_source_pixbuf(cr, pb, 0, 0);
+                cairo_paint(cr);
+                cairo_destroy(cr);
+                g_object_unref(pb);
+                pg.bgSurf = surf;
+            } else { if (err) g_error_free(err); }
+        }
+    }
+}
+
 static bool save_note_to_file(NoteData* nd) {
     std::string fn_utf8 = note_filename(nd);
     FILE* f = wfopen_utf8(fn_utf8, L"wb");
@@ -1712,7 +2170,7 @@ static void on_load_note(const std::string& fn) {
         G.selNote = (int)G.notes.size() - 1;
         G.selPage = 0;
         if (G.canvasSurf) { cairo_surface_destroy(G.canvasSurf); G.canvasSurf = nullptr; }
-        rebuildNoteList(); renderCanvas(); updateStatus();
+        rebuildNoteList(); renderCanvas(); updateStatus(); rebuildThumbs();
     } else {
         G.notes.pop_back();
         logInfo("Failed to load note: %s", fn.c_str());
@@ -1755,7 +2213,7 @@ static void on_batch_import(GtkButton*, gpointer) {
                 G.selNote = G.notes.size() - imported;
                 G.selPage = 0;
                 if (G.canvasSurf) { cairo_surface_destroy(G.canvasSurf); G.canvasSurf = nullptr; }
-                rebuildNoteList(); renderCanvas(); updateStatus();
+                rebuildNoteList(); renderCanvas(); updateStatus(); rebuildThumbs();
             }
 
             char msg[256];
@@ -2287,6 +2745,90 @@ static void on_import_note(GtkButton*, gpointer) {
     gtk_widget_destroy(dlg);
 }
 
+// PDF 匯入
+#include "../import/PdfImporter.h"
+
+static void on_import_pdf(GtkButton*, gpointer) {
+    GtkWidget* dlg = gtk_file_chooser_dialog_new("匯入 PDF", GTK_WINDOW(G.window),
+        GTK_FILE_CHOOSER_ACTION_OPEN, "取消", GTK_RESPONSE_CANCEL, "匯入", GTK_RESPONSE_ACCEPT, nullptr);
+    GtkFileFilter* f = gtk_file_filter_new();
+    gtk_file_filter_set_name(f, "PDF 文件");
+    gtk_file_filter_add_pattern(f, "*.pdf");
+    gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dlg), f);
+
+    if (gtk_dialog_run(GTK_DIALOG(dlg)) == GTK_RESPONSE_ACCEPT) {
+        char* fn = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dlg));
+        if (fn) {
+            std::string pdfPath(fn);
+            std::string saveDir = get_save_dir();
+
+            // 建立筆記
+            G.notes.push_back(NoteData());
+            NoteData* nd = &G.notes.back();
+
+            // 從檔案名取筆記名
+            size_t pos = pdfPath.find_last_of("/\\");
+            std::string baseName = (pos != std::string::npos) ? pdfPath.substr(pos + 1) : pdfPath;
+            if (baseName.size() > 4 && baseName.substr(baseName.size() - 4) == ".pdf")
+                baseName = baseName.substr(0, baseName.size() - 4);
+            nd->name = baseName;
+
+            // 建立專屬目錄存放 PDF 頁面 PNG
+            std::string noteDir = saveDir + "/" + baseName + "_pdf";
+            auto pages = PdfImporter::importPdf(pdfPath, noteDir);
+
+            for (auto& pg : pages) {
+                nd->pages.push_back(PageData());
+                PageData* pd = &nd->pages.back();
+                pd->pw = pg.width;
+                pd->ph = pg.height;
+                pd->pdfPageNum = pg.pdfPageNum;
+                pd->bgFile = baseName + "_pdf/" + pg.bgImagePath;
+                pd->bgW = pg.width;
+                pd->bgH = pg.height;
+
+                // 載入背景
+                std::string fullPath = saveDir + "/" + pd->bgFile;
+                GError* err = nullptr;
+                GdkPixbuf* pb = gdk_pixbuf_new_from_file(fullPath.c_str(), &err);
+                if (pb) {
+                    int w = gdk_pixbuf_get_width(pb), h = gdk_pixbuf_get_height(pb);
+                    cairo_surface_t* surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+                    cairo_t* cr = cairo_create(surf);
+                    gdk_cairo_set_source_pixbuf(cr, pb, 0, 0);
+                    cairo_paint(cr);
+                    cairo_destroy(cr);
+                    g_object_unref(pb);
+                    pd->bgSurf = surf;
+                } else {
+                    if (err) g_error_free(err);
+                }
+            }
+
+            if (!pages.empty()) {
+                G.selNote = (int)G.notes.size() - 1;
+                G.selPage = 0;
+                if (G.canvasSurf) { cairo_surface_destroy(G.canvasSurf); G.canvasSurf = nullptr; }
+                rebuildNoteList(); renderCanvas(); updateStatus(); rebuildThumbs();
+
+                char msg[256];
+                snprintf(msg, sizeof(msg), "PDF 匯入成功!\n%d 頁已匯入", (int)pages.size());
+                GtkWidget* info = gtk_message_dialog_new(GTK_WINDOW(G.window), GTK_DIALOG_MODAL,
+                    GTK_MESSAGE_INFO, GTK_BUTTONS_OK, "%s", msg);
+                gtk_dialog_run(GTK_DIALOG(info)); gtk_widget_destroy(info);
+            } else {
+                G.notes.pop_back();
+                GtkWidget* err = gtk_message_dialog_new(GTK_WINDOW(G.window), GTK_DIALOG_MODAL,
+                    GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "PDF 匯入失敗或無效");
+                gtk_dialog_run(GTK_DIALOG(err)); gtk_widget_destroy(err);
+            }
+
+            g_free(fn);
+        }
+    }
+    gtk_widget_destroy(dlg);
+}
+
 // ============================================================
 // Image loading - GdkPixbuf supports PNG/JPEG/BMP/GIF
 // ============================================================
@@ -2492,6 +3034,7 @@ MainWindow::MainWindow(GtkApplication* app, AppController& ctrl) : app_(app), co
     tb(toolbar,"💾 儲存",G_CALLBACK(on_save));
     gtk_toolbar_insert(toolbar,gtk_separator_tool_item_new(),-1);
     tb(toolbar,"↩ 復原",G_CALLBACK(on_undo));
+    tb(toolbar,"↪ 重做",G_CALLBACK(on_redo));
     tb(toolbar,"🗑 清除頁面",G_CALLBACK(on_del));
     gtk_toolbar_insert(toolbar,gtk_separator_tool_item_new(),-1);
     tb(toolbar,"✏ 鋼筆",G_CALLBACK(on_tool_pen));
@@ -2512,6 +3055,7 @@ MainWindow::MainWindow(GtkApplication* app, AppController& ctrl) : app_(app), co
     tb(toolbar,"📦 批次匯出",G_CALLBACK(on_batch_export));
     tb(toolbar,"📥 匯入筆記",G_CALLBACK(on_import_note));
     tb(toolbar,"📂 批次匯入",G_CALLBACK(on_batch_import));
+    tb(toolbar,"📕 匯入 PDF",G_CALLBACK(on_import_pdf));
 
     // Color button
     GtkWidget* colorBtn = gtk_button_new_with_label("🎨顏色");
@@ -2552,6 +3096,31 @@ MainWindow::MainWindow(GtkApplication* app, AppController& ctrl) : app_(app), co
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(noteScroll),GTK_POLICY_NEVER,GTK_POLICY_AUTOMATIC);
     gtk_container_add(GTK_CONTAINER(noteScroll),G.noteList);
     gtk_box_pack_start(GTK_BOX(sidebar),noteScroll,TRUE,TRUE,0);
+
+    // ── Page thumbnails (bottom of sidebar) ──
+    GtkWidget* thumbLabel = gtk_label_new("頁面縮圖");
+    gtk_widget_set_halign(thumbLabel, GTK_ALIGN_START);
+    gtk_style_context_add_class(gtk_widget_get_style_context(thumbLabel), GTK_STYLE_CLASS_DIM_LABEL);
+    gtk_box_pack_start(GTK_BOX(sidebar), thumbLabel, FALSE, FALSE, 4);
+
+    G.pageThumbs = gtk_list_box_new();
+    gtk_list_box_set_selection_mode(GTK_LIST_BOX(G.pageThumbs), GTK_SELECTION_NONE);
+    g_signal_connect(G.pageThumbs, "row-activated", G_CALLBACK(on_thumb_activated), nullptr);
+    gtk_widget_add_events(G.pageThumbs, GDK_BUTTON_PRESS_MASK);
+
+    GtkWidget* thumbScroll = gtk_scrolled_window_new(nullptr, nullptr);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(thumbScroll), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_widget_set_size_request(thumbScroll, 150, 200);
+    gtk_container_add(GTK_CONTAINER(thumbScroll), G.pageThumbs);
+    gtk_box_pack_start(GTK_BOX(sidebar), thumbScroll, FALSE, FALSE, 2);
+
+    // Search box
+    GtkWidget* searchBox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    G.searchEntry = gtk_search_entry_new();
+    gtk_entry_set_placeholder_text(GTK_ENTRY(G.searchEntry), "搜尋筆記...");
+    g_signal_connect(G.searchEntry, "search-changed", G_CALLBACK(on_search_changed), nullptr);
+    gtk_box_pack_start(GTK_BOX(searchBox), G.searchEntry, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(sidebar), searchBox, FALSE, FALSE, 4);
 
     // Properties panel (for selected text/image)
     G.propPanel = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
@@ -2664,6 +3233,35 @@ MainWindow::MainWindow(GtkApplication* app, AppController& ctrl) : app_(app), co
     // ── Auto-save timer (every 30 seconds) ──
     G.autoSaveTimer = g_timeout_add_seconds(30, auto_save_callback, nullptr);
 
+    // ── Crash recovery: save snapshot path ──
+    G.crashRecoveryFile = get_save_dir() + "/crash_recovery.onote";
+
+    // Check if there's a crash recovery file from previous session
+    if (fs::exists(G.crashRecoveryFile)) {
+        GtkWidget* dlg = gtk_message_dialog_new(GTK_WINDOW(G.window), GTK_DIALOG_MODAL,
+            GTK_MESSAGE_QUESTION, GTK_BUTTONS_YES_NO,
+            "偵測到上次異常關閉。\n是否恢復未儲存的筆記？");
+        int resp = gtk_dialog_run(GTK_DIALOG(dlg));
+        gtk_widget_destroy(dlg);
+
+        if (resp == GTK_RESPONSE_YES) {
+            G.notes.push_back(NoteData());
+            NoteData* nd = &G.notes.back();
+            if (load_note_from_file(G.crashRecoveryFile, nd)) {
+                G.selNote = 0; G.selPage = 0;
+                if (G.canvasSurf) { cairo_surface_destroy(G.canvasSurf); G.canvasSurf = nullptr; }
+                rebuildNoteList(); renderCanvas(); updateStatus(); rebuildThumbs();
+                logInfo("Crash recovery: 已恢復筆記");
+            } else {
+                G.notes.pop_back();
+                logInfo("Crash recovery: 恢復失敗");
+            }
+        } else {
+            // User declined - delete the recovery file
+            fs::remove(G.crashRecoveryFile);
+        }
+    }
+
     // ── Keyboard shortcut hint in status bar ──
     gtk_widget_set_tooltip_text(G.lblStatus,
         "⌨ 快捷鍵:\n"
@@ -2705,6 +3303,9 @@ MainWindow::~MainWindow() {
         G.autoSaveTimer = 0;
     }
     if(G.canvasSurf) cairo_surface_destroy(G.canvasSurf);
+    // Clean up thumbnail surfaces
+    for (auto* s : G.pageThumbSurf) { if (s) cairo_surface_destroy(s); }
+    G.pageThumbSurf.clear();
     G.notes.clear();
 }
 

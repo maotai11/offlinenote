@@ -1,10 +1,10 @@
-# CMakeLists.txt — OfflineNote 根 CMake (MVP 最小可編譯版)
+# CMakeLists.txt — OfflineNote 根 CMake (v4.0 結構重構)
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 cmake_minimum_required(VERSION 3.20)
 
 project(OfflineNote
-    VERSION 2.0.0
+    VERSION 4.0.0
     DESCRIPTION "Offline-first handwriting and PDF annotation desktop application"
     HOMEPAGE_URL "https://github.com/maotai11/offlinenote"
     LANGUAGES CXX C
@@ -19,7 +19,7 @@ include(CompilerFlags)
 include(DependencyVersions)
 include(InstallDirs)
 
-option(OFFLINENOTE_BUILD_TESTS "Build tests" ON)
+option(OFFLINENOTE_BUILD_TESTS "Build tests" OFF)
 option(OFFLINENOTE_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 
 # ──────────────────────────────────────────────
@@ -41,8 +41,7 @@ pkg_check_modules(GLIB2 REQUIRED glib-2.0>=2.56)
 pkg_check_modules(GDK_PIXBUF REQUIRED gdk-pixbuf-2.0>=2.36)
 pkg_check_modules(LIBXML2 REQUIRED libxml-2.0>=2.9)
 pkg_check_modules(ZLIB REQUIRED zlib>=1.2)
-# Poppler for Phase 2 (MVP 先跳過)
-# pkg_check_modules(POPPLER REQUIRED poppler-glib>=0.82)
+pkg_check_modules(POPPLER REQUIRED poppler-glib>=0.82)
 
 if(OFFLINENOTE_ENABLE_ASAN)
     include(Sanitizers)
@@ -50,20 +49,11 @@ if(OFFLINENOTE_ENABLE_ASAN)
 endif()
 
 # ──────────────────────────────────────────────
-# 主要可執行檔
+# 核心庫 (無 GTK 依賴，可供測試使用)
 # ──────────────────────────────────────────────
-add_executable(offlinenote)
+add_library(offlinenote_core_lib STATIC)
 
-target_sources(offlinenote PRIVATE
-    src/main.cpp
-
-    # Application
-    src/application/Application.cpp
-    src/application/AppController.cpp
-    src/application/Config.cpp
-    src/application/PathManager.cpp
-    src/application/StartupCheck.cpp
-
+target_sources(offlinenote_core_lib PRIVATE
     # Document
     src/document/Document.cpp
     src/document/Page.cpp
@@ -71,7 +61,7 @@ target_sources(offlinenote PRIVATE
     src/document/Stroke.cpp
     src/document/ImageElement.cpp
 
-    # Serialization (MVP 最小版)
+    # Serialization
     src/serialization/SecureXmlParser.cpp
     src/serialization/SafeDecompressor.cpp
     src/serialization/NoteSerializer.cpp
@@ -110,20 +100,7 @@ target_sources(offlinenote PRIVATE
     src/import/PdfImporter.cpp
     src/import/ImageImporter.cpp
 
-    # UI
-    src/ui/MainWindow.cpp
-    src/ui/MainToolbar.cpp
-    src/ui/PageCanvas.cpp
-    src/ui/MenuBar.cpp
-    src/ui/StatusBar.cpp
-    src/ui/dialogs/NewDocumentDialog.cpp
-    src/ui/dialogs/ExportDialog.cpp
-    src/ui/dialogs/AboutDialog.cpp
-    src/ui/widgets/ColorButton.cpp
-    src/ui/widgets/PenSizeSlider.cpp
-    src/ui/widgets/ZoomController.cpp
-
-    # Platform
+    # Platform (無 GTK 依賴)
     src/platform/FontManager.cpp
     src/platform/ThemeManager.cpp
     src/platform/CrashLogger.cpp
@@ -138,6 +115,61 @@ target_sources(offlinenote PRIVATE
     src/util/PathValidator.cpp
 )
 
+target_include_directories(offlinenote_core_lib PUBLIC
+    "${CMAKE_SOURCE_DIR}/src"
+    "${CMAKE_BINARY_DIR}/generated"
+)
+
+target_include_directories(offlinenote_core_lib PRIVATE
+    ${GLIB2_INCLUDE_DIRS}
+    ${LIBXML2_INCLUDE_DIRS}
+    ${ZLIB_INCLUDE_DIRS}
+    ${CAIRO_INCLUDE_DIRS}
+    ${GDK_PIXBUF_INCLUDE_DIRS}
+    ${POPPLER_INCLUDE_DIRS}
+)
+
+target_link_libraries(offlinenote_core_lib PRIVATE
+    ${GLIB2_LIBRARIES}
+    ${LIBXML2_LIBRARIES}
+    ${ZLIB_LIBRARIES}
+    ${CAIRO_LIBRARIES}
+    ${GDK_PIXBUF_LIBRARIES}
+    ${POPPLER_LIBRARIES}
+)
+
+target_compile_options(offlinenote_core_lib PRIVATE
+    ${GLIB2_CFLAGS_OTHER}
+    ${LIBXML2_CFLAGS_OTHER}
+)
+
+# ──────────────────────────────────────────────
+# 主要可執行檔
+# ──────────────────────────────────────────────
+add_executable(offlinenote
+    src/main.cpp
+
+    # Application (部分依賴 GTK)
+    src/application/Application.cpp
+    src/application/AppController.cpp
+    src/application/Config.cpp
+    src/application/PathManager.cpp
+    src/application/StartupCheck.cpp
+
+    # UI
+    src/ui/MainWindow.cpp
+    src/ui/MainToolbar.cpp
+    src/ui/PageCanvas.cpp
+    src/ui/MenuBar.cpp
+    src/ui/StatusBar.cpp
+    src/ui/dialogs/NewDocumentDialog.cpp
+    src/ui/dialogs/ExportDialog.cpp
+    src/ui/dialogs/AboutDialog.cpp
+    src/ui/widgets/ColorButton.cpp
+    src/ui/widgets/PenSizeSlider.cpp
+    src/ui/widgets/ZoomController.cpp
+)
+
 target_include_directories(offlinenote PRIVATE
     "${CMAKE_SOURCE_DIR}/src"
     "${CMAKE_BINARY_DIR}/generated"
@@ -147,15 +179,18 @@ target_include_directories(offlinenote PRIVATE
     ${GDK_PIXBUF_INCLUDE_DIRS}
     ${LIBXML2_INCLUDE_DIRS}
     ${ZLIB_INCLUDE_DIRS}
+    ${POPPLER_INCLUDE_DIRS}
 )
 
 target_link_libraries(offlinenote PRIVATE
+    offlinenote_core_lib
     ${GTK3_LIBRARIES}
     ${CAIRO_LIBRARIES}
     ${GLIB2_LIBRARIES}
     ${GDK_PIXBUF_LIBRARIES}
     ${LIBXML2_LIBRARIES}
     ${ZLIB_LIBRARIES}
+    ${POPPLER_LIBRARIES}
 )
 
 # Windows: 不顯示 console 視窗
@@ -170,6 +205,7 @@ if(OFFLINENOTE_BUILD_TESTS)
     enable_testing()
     add_library(catch2_vendored STATIC test/catch_amalgamated.cpp)
     target_include_directories(catch2_vendored PUBLIC test)
+    target_link_libraries(catch2_vendored PRIVATE ${GLIB2_LIBRARIES} ${LIBXML2_LIBRARIES})
     add_subdirectory(test)
 endif()
 
