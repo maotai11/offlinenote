@@ -123,6 +123,10 @@ static struct {
     double pageScrollY = 0; // Vertical scroll offset when zoomed
     double pageScrollX = 0; // Horizontal scroll offset when zoomed
 
+    // Auto-save
+    guint autoSaveTimer = 0;
+    bool shuttingDown = false;
+
     AppController* ctrl = nullptr;
 } G;
 
@@ -141,8 +145,34 @@ static void renderCanvas();
 static void hideTextEntry();
 static void on_note_rename(GtkMenuItem*, gpointer);
 static void on_note_delete(GtkMenuItem*, gpointer);
+static void on_save(GtkButton*, gpointer);
 static std::string get_save_dir();
+static std::string get_exe_dir();
 static std::string note_filename(NoteData* nd);
+static bool save_note_to_file(NoteData* nd);
+
+// Path validation - prevent path traversal attacks
+static bool is_safe_path(const std::string& path) {
+    // Block absolute paths and path traversal
+    if (path.empty() || path[0] == '/' || path[0] == '\\') return false;
+    if (path.find("..") != std::string::npos) return false;
+    if (path.find(':') != std::string::npos) return false; // Block Windows drive letters
+    return true;
+}
+
+// Sanitize external file paths from .onote files
+static std::string sanitize_resource_path(const std::string& path) {
+    // If absolute path, extract just the filename
+    size_t pos = path.find_last_of("/\\");
+    std::string filename = (pos != std::string::npos) ? path.substr(pos + 1) : path;
+    // Remove dangerous characters
+    std::string safe;
+    for (char c : filename) {
+        if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|') continue;
+        safe += c;
+    }
+    return safe;
+}
 
 // ============================================================
 // Helpers
@@ -189,6 +219,22 @@ static void updateStatus() {
         gtk_label_set_text(GTK_LABEL(G.lblPage), p);
         gtk_widget_set_tooltip_text(G.lblPage, "點擊側邊欄筆記旁的 ✎ 可重命名\n點擊 ✖ 可刪除筆記");
     }
+}
+
+// Auto-save callback (called every 30 seconds)
+static gboolean auto_save_callback(gpointer) {
+    if (G.shuttingDown) return FALSE;
+    int saved = 0;
+    for (auto& n : G.notes) {
+        if (n.dirty) {
+            save_note_to_file(&n);
+            saved++;
+        }
+    }
+    if (saved > 0) {
+        logInfo("Auto-saved %d notes", saved);
+    }
+    return TRUE; // keep running
 }
 
 // Update properties panel based on current selection
@@ -289,8 +335,13 @@ static void ensureTextOverlay() {
     gtk_widget_set_visible(G.textOverlayBox, FALSE);
 
     G.textEntry = gtk_entry_new();
-    gtk_entry_set_placeholder_text(GTK_ENTRY(G.textEntry), "輸入文字...");
+    gtk_entry_set_placeholder_text(GTK_ENTRY(G.textEntry), "輸入文字 (Enter 完成)");
     gtk_widget_set_size_request(G.textEntry, 200, -1);
+    gtk_widget_set_tooltip_text(G.textEntry,
+        "文字工具操作指南:\n"
+        "• 輸入文字後按 Enter 完成\n"
+        "• 選取工具可拖曳已輸入的文字\n"
+        "• 多行文字：請分多次輸入");
     gtk_box_pack_start(GTK_BOX(G.textOverlayBox), G.textEntry, TRUE, TRUE, 0);
 
     G.textSizeSpin = gtk_spin_button_new_with_range(8, 72, 1);
@@ -964,6 +1015,12 @@ static gboolean on_keypress(GtkWidget*, GdkEventKey* ev, gpointer) {
         return TRUE;
     }
 
+    // Ctrl+S = Save
+    if ((ev->keyval == GDK_KEY_s || ev->keyval == GDK_KEY_S) && (ev->state & GDK_CONTROL_MASK)) {
+        on_save(nullptr, nullptr);
+        return TRUE;
+    }
+
     // Delete
     if (ev->keyval == GDK_KEY_Delete || ev->keyval == GDK_KEY_BackSpace) {
         if (G.selImg >= 0 && G.selImg < (int)pg->images.size()) {
@@ -1320,30 +1377,29 @@ static void on_page_orientation(GtkButton*, gpointer) {
 // Save/Load - actual .onote file serialization
 // ============================================================
 static std::string get_save_dir() {
-    // Most reliable path: user home directory (always writable)
-    std::string dir = std::string(g_get_home_dir()) + "\\OfflineNote\\notes";
+    // Use exe directory - most reliable for portable apps
+    std::string exeDir = get_exe_dir();
+    std::string dir = exeDir + "/data/notes";
 
     // Ensure directory exists
     std::error_code ec;
     fs::create_directories(fs::path(dir), ec);
     if (ec) {
-        // Last resort: temp directory
-        dir = std::string(g_get_tmp_dir()) + "\\OfflineNote_notes";
+        // Fallback to user home
+        dir = std::string(g_get_home_dir()) + "/OfflineNote/notes";
         fs::create_directories(fs::path(dir), ec);
-        if (ec) {
-            logInfo("嚴重: 無法建立儲存目錄，儲存將失敗");
-        }
     }
     return dir;
 }
 
 static std::string note_filename(NoteData* nd) {
     std::string fn = nd->name;
+    if (fn.empty()) fn = "unnamed";
+    // Sanitize filename - remove dangerous characters
     for (auto& c : fn) {
         if (c == ' ' || c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|') c = '_';
     }
-    if (fn.empty()) fn = "unnamed";
-    return get_save_dir() + "\\" + fn + ".onote";
+    return get_save_dir() + "/" + fn + ".onote";
 }
 
 // Helper: Convert UTF-8 string to wide string (for Windows file paths)
@@ -1360,6 +1416,26 @@ static std::wstring utf8_to_wide(const std::string& utf8) {
 static FILE* wfopen_utf8(const std::string& path_utf8, const wchar_t* mode) {
     std::wstring wpath = utf8_to_wide(path_utf8);
     return _wfopen(wpath.c_str(), mode);
+}
+
+// Helper: Get exe directory using Windows API (most reliable)
+static std::string get_exe_dir() {
+    wchar_t wPath[MAX_PATH];
+    DWORD len = GetModuleFileNameW(nullptr, wPath, MAX_PATH);
+    if (len > 0 && len < MAX_PATH) {
+        std::wstring ws(wPath);
+        size_t pos = ws.find_last_of(L"\\/");
+        if (pos != std::string::npos) {
+            std::wstring wDir = ws.substr(0, pos);
+            // Convert wide to narrow UTF-8
+            int size_needed = WideCharToMultiByte(CP_UTF8, 0, &wDir[0], (int)wDir.size(), NULL, 0, NULL, NULL);
+            std::string result(size_needed, 0);
+            WideCharToMultiByte(CP_UTF8, 0, &wDir[0], (int)wDir.size(), &result[0], size_needed, NULL, NULL);
+            return result;
+        }
+    }
+    // Fallback
+    return ".";
 }
 
 // Simple text-based serialization using FILE* for wide path support
@@ -1404,14 +1480,17 @@ static bool save_note_to_file(NoteData* nd) {
         for (size_t ii = 0; ii < pg->images.size(); ii++) {
             ImgEl* img = &pg->images[ii];
             if (!img->srcFile.empty()) {
+                // Sanitize path - only store filename, not full path
+                std::string safePath = sanitize_resource_path(img->srcFile);
                 fprintf(f, "img %zu x=%g y=%g w=%g h=%g src=%s\n",
-                        ii, img->x, img->y, img->w, img->h, img->srcFile.c_str());
+                        ii, img->x, img->y, img->w, img->h, safePath.c_str());
             }
         }
 
         // Save background source
         if (!pg->bgFile.empty()) {
-            fprintf(f, "bg src=%s w=%g h=%g\n", pg->bgFile.c_str(), pg->bgW, pg->bgH);
+            std::string safePath = sanitize_resource_path(pg->bgFile);
+            fprintf(f, "bg src=%s w=%g h=%g\n", safePath.c_str(), pg->bgW, pg->bgH);
         }
     }
 
@@ -1493,10 +1572,25 @@ static bool load_note_from_file(const std::string& fn, NoteData* nd) {
                 tok = strstr((char*)line.c_str(), "h="); if(tok) img->h = atof(tok+2);
                 tok = strstr((char*)line.c_str(), "src="); if(tok) img->srcFile = tok+4;
 
+                // Resolve path relative to note directory and validate
+                std::string imgPath = img->srcFile;
+                if (!is_safe_path(imgPath)) {
+                    // Path traversal detected - sanitize
+                    imgPath = sanitize_resource_path(imgPath);
+                    img->srcFile = imgPath;
+                }
+                // Try relative to note directory first
+                std::string saveDir = get_save_dir();
+                std::string fullPath = saveDir + "/" + imgPath;
+                if (!fs::exists(fullPath)) {
+                    // Try original path
+                    fullPath = imgPath;
+                }
+
                 // Reload image if file exists
-                if (!img->srcFile.empty() && fs::exists(img->srcFile)) {
+                if (!imgPath.empty() && fs::exists(fullPath)) {
                     GError* err = nullptr;
-                    GdkPixbuf* pb = gdk_pixbuf_new_from_file(img->srcFile.c_str(), &err);
+                    GdkPixbuf* pb = gdk_pixbuf_new_from_file(fullPath.c_str(), &err);
                     if (pb) {
                         int w = gdk_pixbuf_get_width(pb), h = gdk_pixbuf_get_height(pb);
                         cairo_surface_t* surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
@@ -1520,10 +1614,22 @@ static bool load_note_from_file(const std::string& fn, NoteData* nd) {
                     tok = strstr((char*)line.c_str(), "w="); if(tok) pg->bgW = atof(tok+2);
                     tok = strstr((char*)line.c_str(), "h="); if(tok) pg->bgH = atof(tok+2);
 
+                    // Validate and resolve background path
+                    std::string bgPath = pg->bgFile;
+                    if (!is_safe_path(bgPath)) {
+                        bgPath = sanitize_resource_path(bgPath);
+                        pg->bgFile = bgPath;
+                    }
+                    std::string saveDir = get_save_dir();
+                    std::string fullPath = saveDir + "/" + bgPath;
+                    if (!fs::exists(fullPath)) {
+                        fullPath = bgPath;
+                    }
+
                     // Reload background
-                    if (!pg->bgFile.empty() && fs::exists(pg->bgFile)) {
+                    if (!bgPath.empty() && fs::exists(fullPath)) {
                         GError* err = nullptr;
-                        GdkPixbuf* pb = gdk_pixbuf_new_from_file(pg->bgFile.c_str(), &err);
+                        GdkPixbuf* pb = gdk_pixbuf_new_from_file(fullPath.c_str(), &err);
                         if (pb) {
                             int w = gdk_pixbuf_get_width(pb), h = gdk_pixbuf_get_height(pb);
                             cairo_surface_t* surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
@@ -2241,7 +2347,7 @@ static void on_page_settings(GtkButton*, gpointer) {
 static void on_about(GtkButton*, gpointer) {
     GtkWidget* dlg=gtk_about_dialog_new();
     gtk_about_dialog_set_program_name(GTK_ABOUT_DIALOG(dlg),"OfflineNote");
-    gtk_about_dialog_set_version(GTK_ABOUT_DIALOG(dlg),"1.0.0");
+    gtk_about_dialog_set_version(GTK_ABOUT_DIALOG(dlg),"2.0");
     gtk_about_dialog_set_comments(GTK_ABOUT_DIALOG(dlg),"離線筆記本");
     gtk_about_dialog_set_license(GTK_ABOUT_DIALOG(dlg),"GPL-2.0");
     gtk_dialog_run(GTK_DIALOG(dlg));gtk_widget_destroy(dlg);
@@ -2488,6 +2594,42 @@ MainWindow::MainWindow(GtkApplication* app, AppController& ctrl) : app_(app), co
     renderCanvas();
     updateStatus();
     state_ = this;
+
+    // ── Auto-save timer (every 30 seconds) ──
+    G.autoSaveTimer = g_timeout_add_seconds(30, auto_save_callback, nullptr);
+
+    // ── Keyboard shortcut hint in status bar ──
+    gtk_widget_set_tooltip_text(G.lblStatus,
+        "⌨ 快捷鍵:\n"
+        "• Ctrl+V: 貼上剪貼簿圖片或文字\n"
+        "• Ctrl+Z: 復原上一筆劃\n"
+        "• Ctrl+S: 儲存筆記\n"
+        "• Ctrl+滾輪: 放大/縮小\n"
+        "• 滾輪: 垂直平移\n"
+        "• Shift+滾輪: 水平平移\n\n"
+        "📋 Ctrl+V 貼上教學:\n"
+        "• 在瀏覽器/圖片檢視器複製圖片 → Ctrl+V\n"
+        "• Windows 截圖工具 (Win+Shift+S) → Ctrl+V\n"
+        "• 複製文字 → Ctrl+V 貼上為文字元素");
+
+    // ── Shutdown handler - auto-save all dirty notes ──
+    g_signal_connect(G.window, "delete-event", G_CALLBACK(+[](GtkWidget*, GdkEvent*, gpointer) -> gboolean {
+        G.shuttingDown = true;
+        // Stop auto-save timer
+        if (G.autoSaveTimer) {
+            g_source_remove(G.autoSaveTimer);
+            G.autoSaveTimer = 0;
+        }
+        // Auto-save all dirty notes
+        for (auto& n : G.notes) {
+            if (n.dirty) {
+                save_note_to_file(&n);
+            }
+        }
+        // Destroy window
+        gtk_widget_destroy(G.window);
+        return TRUE; // Stop default handler
+    }), nullptr);
 }
 
 MainWindow::~MainWindow() {

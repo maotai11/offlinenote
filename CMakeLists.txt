@@ -4,9 +4,9 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(OfflineNote
-    VERSION 0.1.0
+    VERSION 2.0.0
     DESCRIPTION "Offline-first handwriting and PDF annotation desktop application"
-    HOMEPAGE_URL "https://github.com/example/offlinenote"
+    HOMEPAGE_URL "https://github.com/maotai11/offlinenote"
     LANGUAGES CXX C
 )
 
