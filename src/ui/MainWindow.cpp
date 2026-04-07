@@ -1402,6 +1402,14 @@ static std::string note_filename(NoteData* nd) {
     return get_save_dir() + "/" + fn + ".onote";
 }
 
+// Helper: Convert wide string to UTF-8
+static std::string wstring_to_utf8(const std::wstring& wstr) {
+    int len = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), (int)wstr.size(), NULL, 0, NULL, NULL);
+    std::string result(len, 0);
+    WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), (int)wstr.size(), &result[0], len, NULL, NULL);
+    return result;
+}
+
 // Helper: Convert UTF-8 string to wide string (for Windows file paths)
 static std::wstring utf8_to_wide(const std::string& utf8) {
     int len = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
@@ -1427,11 +1435,7 @@ static std::string get_exe_dir() {
         size_t pos = ws.find_last_of(L"\\/");
         if (pos != std::string::npos) {
             std::wstring wDir = ws.substr(0, pos);
-            // Convert wide to narrow UTF-8
-            int size_needed = WideCharToMultiByte(CP_UTF8, 0, &wDir[0], (int)wDir.size(), NULL, 0, NULL, NULL);
-            std::string result(size_needed, 0);
-            WideCharToMultiByte(CP_UTF8, 0, &wDir[0], (int)wDir.size(), &result[0], size_needed, NULL, NULL);
-            return result;
+            return wstring_to_utf8(wDir);
         }
     }
     // Fallback
@@ -1499,21 +1503,25 @@ static bool save_note_to_file(NoteData* nd) {
     return true;
 }
 
-static bool load_note_from_file(const std::string& fn, NoteData* nd) {
-    std::ifstream ifs(fn, std::ios::binary);
-    if (!ifs.is_open()) return false;
+static bool load_note_from_file(const std::string& fn_utf8, NoteData* nd) {
+    // Use _wfopen for wide path support (Chinese characters)
+    FILE* f = wfopen_utf8(fn_utf8, L"rb");
+    if (!f) return false;
 
-    std::string line;
+    char line[4096];
     int curPage = -1;
     StrokeData* curStroke = nullptr;
 
-    while (std::getline(ifs, line)) {
-        if (line.empty() || line[0] == '#') continue;
+    while (fgets(line, sizeof(line), f)) {
+        std::string sline(line);
+        // Trim trailing newline
+        if (!sline.empty() && sline.back() == '\n') sline.pop_back();
+        if (sline.empty() || sline[0] == '#') continue;
 
-        if (line.substr(0, 5) == "name=") { nd->name = line.substr(5); continue; }
-        if (line.substr(0, 6) == "pages=") continue;
+        if (sline.substr(0, 5) == "name=") { nd->name = sline.substr(5); continue; }
+        if (sline.substr(0, 6) == "pages=") continue;
 
-        if (line.substr(0, 6) == "[page ") {
+        if (sline.substr(0, 6) == "[page ") {
             curPage++;
             nd->pages.push_back(PageData());
             continue;
@@ -1522,14 +1530,14 @@ static bool load_note_from_file(const std::string& fn, NoteData* nd) {
         if (curPage >= 0 && curPage < (int)nd->pages.size()) {
             PageData* pg = &nd->pages[curPage];
 
-            if (line.substr(0, 3) == "pw=") { pg->pw = atof(line.c_str()+3); continue; }
-            if (line.substr(0, 3) == "ph=") { pg->ph = atof(line.c_str()+3); continue; }
+            if (sline.substr(0, 3) == "pw=") { pg->pw = atof(sline.c_str()+3); continue; }
+            if (sline.substr(0, 3) == "ph=") { pg->ph = atof(sline.c_str()+3); continue; }
 
-            if (line.substr(0, 2) == "s ") {
+            if (sline.substr(0, 2) == "s ") {
                 pg->strokes.push_back(StrokeData());
                 curStroke = &pg->strokes.back();
                 // Parse params
-                char* str = (char*)line.c_str();
+                char* str = (char*)sline.c_str();
                 char* tok;
                 tok = strstr(str, "w="); if(tok) curStroke->w = atof(tok+2);
                 tok = strstr(str, "r="); if(tok) curStroke->r = atof(tok+2);
@@ -1540,37 +1548,37 @@ static bool load_note_from_file(const std::string& fn, NoteData* nd) {
                 continue;
             }
 
-            if (line[0] == 'p' && line[1] == ' ' && curStroke) {
+            if (sline[0] == 'p' && sline[1] == ' ' && curStroke) {
                 double x, y;
-                if (sscanf(line.c_str()+2, "%lf %lf", &x, &y) == 2) {
+                if (sscanf(sline.c_str()+2, "%lf %lf", &x, &y) == 2) {
                     curStroke->addPt(x, y);
                 }
                 continue;
             }
 
-            if (line.substr(0, 2) == "t ") {
+            if (sline.substr(0, 2) == "t ") {
                 pg->texts.push_back(TxtEl());
                 TxtEl* t = &pg->texts.back();
                 char* tok;
-                tok = strstr((char*)line.c_str(), "x="); if(tok) t->x = atof(tok+2);
-                tok = strstr((char*)line.c_str(), "y="); if(tok) t->y = atof(tok+2);
-                tok = strstr((char*)line.c_str(), "fs="); if(tok) t->fontSize = atof(tok+3);
-                tok = strstr((char*)line.c_str(), "r="); if(tok) t->r = atof(tok+2);
-                tok = strstr((char*)line.c_str(), "g="); if(tok) t->g = atof(tok+2);
-                tok = strstr((char*)line.c_str(), "b="); if(tok) t->b = atof(tok+2);
-                tok = strstr((char*)line.c_str(), "txt="); if(tok) t->text = tok+4;
+                tok = strstr((char*)sline.c_str(), "x="); if(tok) t->x = atof(tok+2);
+                tok = strstr((char*)sline.c_str(), "y="); if(tok) t->y = atof(tok+2);
+                tok = strstr((char*)sline.c_str(), "fs="); if(tok) t->fontSize = atof(tok+3);
+                tok = strstr((char*)sline.c_str(), "r="); if(tok) t->r = atof(tok+2);
+                tok = strstr((char*)sline.c_str(), "g="); if(tok) t->g = atof(tok+2);
+                tok = strstr((char*)sline.c_str(), "b="); if(tok) t->b = atof(tok+2);
+                tok = strstr((char*)sline.c_str(), "txt="); if(tok) t->text = tok+4;
                 continue;
             }
 
-            if (line.substr(0, 4) == "img ") {
+            if (sline.substr(0, 4) == "img ") {
                 pg->images.push_back(ImgEl());
                 ImgEl* img = &pg->images.back();
                 char* tok;
-                tok = strstr((char*)line.c_str(), "x="); if(tok) img->x = atof(tok+2);
-                tok = strstr((char*)line.c_str(), "y="); if(tok) img->y = atof(tok+2);
-                tok = strstr((char*)line.c_str(), "w="); if(tok) img->w = atof(tok+2);
-                tok = strstr((char*)line.c_str(), "h="); if(tok) img->h = atof(tok+2);
-                tok = strstr((char*)line.c_str(), "src="); if(tok) img->srcFile = tok+4;
+                tok = strstr((char*)sline.c_str(), "x="); if(tok) img->x = atof(tok+2);
+                tok = strstr((char*)sline.c_str(), "y="); if(tok) img->y = atof(tok+2);
+                tok = strstr((char*)sline.c_str(), "w="); if(tok) img->w = atof(tok+2);
+                tok = strstr((char*)sline.c_str(), "h="); if(tok) img->h = atof(tok+2);
+                tok = strstr((char*)sline.c_str(), "src="); if(tok) img->srcFile = tok+4;
 
                 // Resolve path relative to note directory and validate
                 std::string imgPath = img->srcFile;
@@ -1607,12 +1615,12 @@ static bool load_note_from_file(const std::string& fn, NoteData* nd) {
                 continue;
             }
 
-            if (line.substr(0, 3) == "bg ") {
-                char* tok = strstr((char*)line.c_str(), "src=");
+            if (sline.substr(0, 3) == "bg ") {
+                char* tok = strstr((char*)sline.c_str(), "src=");
                 if (tok) {
                     pg->bgFile = tok + 4;
-                    tok = strstr((char*)line.c_str(), "w="); if(tok) pg->bgW = atof(tok+2);
-                    tok = strstr((char*)line.c_str(), "h="); if(tok) pg->bgH = atof(tok+2);
+                    tok = strstr((char*)sline.c_str(), "w="); if(tok) pg->bgW = atof(tok+2);
+                    tok = strstr((char*)sline.c_str(), "h="); if(tok) pg->bgH = atof(tok+2);
 
                     // Validate and resolve background path
                     std::string bgPath = pg->bgFile;
@@ -1648,6 +1656,8 @@ static bool load_note_from_file(const std::string& fn, NoteData* nd) {
             }
         }
     }
+
+    fclose(f);
     return true;
 }
 
@@ -1705,7 +1715,58 @@ static void on_load_note(const std::string& fn) {
         rebuildNoteList(); renderCanvas(); updateStatus();
     } else {
         G.notes.pop_back();
+        logInfo("Failed to load note: %s", fn.c_str());
     }
+}
+
+// Batch import notes from a folder
+static void on_batch_import(GtkButton*, gpointer) {
+    GtkWidget* dlg = gtk_file_chooser_dialog_new("批次匯入筆記資料夾", GTK_WINDOW(G.window),
+        GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER, "取消", GTK_RESPONSE_CANCEL, "匯入", GTK_RESPONSE_ACCEPT, nullptr);
+    if (gtk_dialog_run(GTK_DIALOG(dlg)) == GTK_RESPONSE_ACCEPT) {
+        char* dirPath = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dlg));
+        if (dirPath) {
+            // Convert path to wide string for directory iteration
+            std::wstring wDirPath = utf8_to_wide(std::string(dirPath));
+            int imported = 0;
+            int failed = 0;
+            
+            try {
+                if (fs::exists(wDirPath)) {
+                    for (const auto& entry : fs::directory_iterator(wDirPath)) {
+                        if (entry.is_regular_file() && entry.path().extension() == ".onote") {
+                            std::string notePath = entry.path().u8string();
+                            NoteData* nd = &G.notes.emplace_back();
+                            if (load_note_from_file(notePath, nd)) {
+                                imported++;
+                            } else {
+                                G.notes.pop_back();
+                                failed++;
+                            }
+                        }
+                    }
+                }
+            } catch (const std::exception& e) {
+                logInfo("Batch import error: %s", e.what());
+            }
+
+            // Select first imported note if any
+            if (imported > 0) {
+                G.selNote = G.notes.size() - imported;
+                G.selPage = 0;
+                if (G.canvasSurf) { cairo_surface_destroy(G.canvasSurf); G.canvasSurf = nullptr; }
+                rebuildNoteList(); renderCanvas(); updateStatus();
+            }
+
+            char msg[256];
+            snprintf(msg, sizeof(msg), "匯入完成!\n成功: %d 個\n失敗: %d 個", imported, failed);
+            GtkWidget* info = gtk_message_dialog_new(GTK_WINDOW(G.window), GTK_DIALOG_MODAL,
+                GTK_MESSAGE_INFO, GTK_BUTTONS_OK, "%s", msg);
+            gtk_dialog_run(GTK_DIALOG(info)); gtk_widget_destroy(info);
+            g_free(dirPath);
+        }
+    }
+    gtk_widget_destroy(dlg);
 }
 
 // ============================================================
@@ -2215,9 +2276,11 @@ static void on_import_note(GtkButton*, gpointer) {
     if(gtk_dialog_run(GTK_DIALOG(dlg))==GTK_RESPONSE_ACCEPT){
         char* fn=gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dlg));
         if(fn){
-            on_load_note(std::string(fn));
-            logInfo("已匯入筆記");
-            gtk_label_set_text(GTK_LABEL(G.lblStatus), "已匯入筆記");
+            // On Windows, gtk_file_chooser_get_filename returns locale-encoded string
+            // We need to convert it to UTF-8 for our wfopen_utf8 function
+            std::string utf8Path = fn;
+            on_load_note(utf8Path);
+            logInfo("已匯入筆記: %s", fn);
             g_free(fn);
         }
     }
@@ -2448,6 +2511,7 @@ MainWindow::MainWindow(GtkApplication* app, AppController& ctrl) : app_(app), co
     tb(toolbar,"📤 匯出筆記",G_CALLBACK(on_export_note));
     tb(toolbar,"📦 批次匯出",G_CALLBACK(on_batch_export));
     tb(toolbar,"📥 匯入筆記",G_CALLBACK(on_import_note));
+    tb(toolbar,"📂 批次匯入",G_CALLBACK(on_batch_import));
 
     // Color button
     GtkWidget* colorBtn = gtk_button_new_with_label("🎨顏色");
@@ -2572,10 +2636,12 @@ MainWindow::MainWindow(GtkApplication* app, AppController& ctrl) : app_(app), co
 
     // ── Load existing notes ──
     std::string saveDir = get_save_dir();
-    if (fs::exists(saveDir)) {
-        for (auto& entry : fs::directory_iterator(saveDir)) {
+    std::wstring wSaveDir = utf8_to_wide(saveDir);
+    if (fs::exists(wSaveDir)) {
+        for (auto& entry : fs::directory_iterator(wSaveDir)) {
             if (entry.path().extension() == ".onote") {
-                on_load_note(entry.path().string());
+                // Use u8string() for proper UTF-8 encoding
+                on_load_note(entry.path().u8string());
             }
         }
     }
@@ -2626,13 +2692,18 @@ MainWindow::MainWindow(GtkApplication* app, AppController& ctrl) : app_(app), co
                 save_note_to_file(&n);
             }
         }
-        // Destroy window
-        gtk_widget_destroy(G.window);
-        return TRUE; // Stop default handler
+        // Return FALSE to let the default handler destroy the window and quit the app
+        // Returning TRUE would inhibit the default handler, causing the app to hang
+        return FALSE;
     }), nullptr);
 }
 
 MainWindow::~MainWindow() {
+    // Stop auto-save timer if still running
+    if (G.autoSaveTimer) {
+        g_source_remove(G.autoSaveTimer);
+        G.autoSaveTimer = 0;
+    }
     if(G.canvasSurf) cairo_surface_destroy(G.canvasSurf);
     G.notes.clear();
 }
