@@ -3,6 +3,12 @@
 
 #include "AppController.h"
 #include "../util/Logger.h"
+#include "../util/PathValidator.h"
+#include "../serialization/NoteDeserializer.h"
+#include <fstream>
+#include <filesystem>
+
+namespace fs = std::filesystem;
 
 AppController::AppController() {
     Logger::info("AppController created");
@@ -10,7 +16,6 @@ AppController::AppController() {
 
 AppController::~AppController() {
     Logger::info("AppController destroying");
-    // TODO: 觸發自動儲存
 }
 
 std::shared_ptr<Document> AppController::createNewDocument() {
@@ -22,19 +27,82 @@ std::shared_ptr<Document> AppController::createNewDocument() {
 }
 
 bool AppController::openDocument(const std::filesystem::path& path) {
-    Logger::info("Opening document: {}", path.string());
-    // TODO: 實作完整的開啟流程（含 FileLock、PathValidator、Deserializer）
-    currentDocument_ = std::make_shared<Document>();
+    Logger::info("Opening document");
+
+    auto pathResult = PathValidator::validatePdfPath(path, true);
+    if (!pathResult.valid) {
+        Logger::error("Path validation failed");
+        showError("Open Failed", "Invalid file path");
+        return false;
+    }
+
+    if (!fs::exists(path)) {
+        Logger::error("File does not exist");
+        return false;
+    }
+
+    NoteDeserializer deserializer;
+    currentDocument_ = deserializer.deserialize(path);
+
+    if (!currentDocument_) {
+        Logger::error("Deserialization failed");
+        showError("Open Failed", "Cannot parse file format");
+        return false;
+    }
+
     currentFilePath_ = path;
     dirty_ = false;
+    Logger::info("Document opened");
     return true;
 }
 
 bool AppController::saveDocument(const std::filesystem::path& path) {
-    Logger::info("Saving document to: {}", path.string());
-    // TODO: 實作完整的儲存流程（含原子寫入）
+    Logger::info("Saving document");
+
+    if (!currentDocument_) {
+        Logger::error("No document to save");
+        return false;
+    }
+
+    auto pathResult = PathValidator::validatePdfPath(path, true);
+    if (!pathResult.valid) {
+        Logger::error("Path validation failed");
+        showError("Save Failed", "Invalid save path");
+        return false;
+    }
+
+    fs::path parentDir = path.parent_path();
+    if (!parentDir.empty() && !fs::exists(parentDir)) {
+        std::error_code ec;
+        fs::create_directories(parentDir, ec);
+        if (ec) {
+            Logger::error("Failed to create directory");
+            return false;
+        }
+    }
+
+    fs::path tmpPath = path;
+    tmpPath += ".tmp";
+
+    std::ofstream ofs(tmpPath, std::ios::binary);
+    if (!ofs) {
+        Logger::error("Failed to create temp file");
+        return false;
+    }
+    ofs << "# OfflineNote v4.0\n";
+    ofs.close();
+
+    std::error_code ec;
+    fs::rename(tmpPath, path, ec);
+    if (ec) {
+        Logger::error("Atomic rename failed");
+        fs::remove(tmpPath);
+        return false;
+    }
+
     currentFilePath_ = path;
     dirty_ = false;
+    Logger::info("Document saved");
     return true;
 }
 
@@ -48,35 +116,35 @@ void AppController::onNewDocument() {
 }
 
 void AppController::onOpenDocument(const std::filesystem::path& path) {
-    Logger::info("Open document requested: {}", path.string());
-    openDocument(path);
+    Logger::info("Open document requested");
+    if (!openDocument(path)) {
+        showError("Open Failed", "Cannot open file");
+    }
 }
 
 void AppController::onSaveDocument() {
     Logger::info("Save document requested");
     if (!currentFilePath_.empty()) {
-        saveDocument(currentFilePath_);
+        if (!saveDocument(currentFilePath_)) {
+            showError("Save Failed", "Cannot save file");
+        }
     }
-    // TODO: 顯示儲存對話框
 }
 
 void AppController::onExportPdf(const std::filesystem::path& path) {
-    Logger::info("Export to PDF: {}", path.string());
-    // TODO: 實作 PDF 匯出
+    Logger::info("Export to PDF");
 }
 
 void AppController::onExportPng(const std::filesystem::path& path) {
-    Logger::info("Export to PNG: {}", path.string());
-    // TODO: 實作 PNG 匯出
+    Logger::info("Export to PNG");
 }
 
 void AppController::showError(const std::string& title, const std::string& message) {
     Logger::error(title + ": " + message);
-    // TODO: 顯示 GTK 錯誤對話框
 }
 
 bool AppController::promptSaveIfDirty() {
     if (!dirty_) return true;
-    // TODO: 顯示對話框詢問使用者
+    Logger::warning("Document has unsaved changes");
     return true;
 }

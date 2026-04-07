@@ -80,11 +80,15 @@ PathValidationResult PathValidator::validatePdfPath(
     bool fromUserFileDialog)
 {
     if (fromUserFileDialog) {
+        // 使用者從檔案對話框選擇的路徑：允許任意絕對路徑
         return validatePath(path, PathValidationPolicy::AllowAnyAbsolute);
     }
     else {
-        Logger::debug("PathValidator: Validating PDF path from .onote file");
-        return validatePath(path, PathValidationPolicy::AllowAnyAbsolute);
+        // 來自 .onote 嵌入路徑：必須更嚴格，限制在資源目錄內
+        Logger::debug("PathValidator: Validating embedded resource path from .onote file");
+        // 使用 RestrictToDirectory 策略，限制在可執行檔目錄下
+        fs::path exeDir = fs::path("C:\\Users\\LIN\\OfflineNote\\dist\\portable");  // TODO: Use get_exe_dir()
+        return validatePath(path, PathValidationPolicy::RestrictToDirectory, exeDir);
     }
 }
 

@@ -1811,12 +1811,12 @@ static void deserializeNoteToCurrent(const std::string& data) {
                 curStroke = &pg->strokes.back();
                 char* str = (char*)line.c_str();
                 char* tok;
-                tok = strstr(str, "w="); if(tok) curStroke->w = atof(tok+2);
-                tok = strstr(str, "r="); if(tok) curStroke->r = atof(tok+2);
-                tok = strstr(str, "g="); if(tok) curStroke->g = atof(tok+2);
-                tok = strstr(str, "b="); if(tok) curStroke->b = atof(tok+2);
-                tok = strstr(str, "a="); if(tok) curStroke->a = atof(tok+2);
-                tok = strstr(str, "t="); if(tok) curStroke->tool = atoi(tok+2);
+                tok = strstr((const char*)str, "w="); if(tok) curStroke->w = atof(tok+2);
+                tok = strstr((const char*)str, "r="); if(tok) curStroke->r = atof(tok+2);
+                tok = strstr((const char*)str, "g="); if(tok) curStroke->g = atof(tok+2);
+                tok = strstr((const char*)str, "b="); if(tok) curStroke->b = atof(tok+2);
+                tok = strstr((const char*)str, "a="); if(tok) curStroke->a = atof(tok+2);
+                tok = strstr((const char*)str, "t="); if(tok) curStroke->tool = atoi(tok+2);
                 continue;
             }
 
@@ -1966,12 +1966,25 @@ static bool load_note_from_file(const std::string& fn_utf8, NoteData* nd) {
     FILE* f = wfopen_utf8(fn_utf8, L"rb");
     if (!f) return false;
 
-    char line[4096];
+    // Use dynamic line buffer to avoid truncation of long lines
+    std::string line;
+    line.reserve(8192);
     int curPage = -1;
     StrokeData* curStroke = nullptr;
 
-    while (fgets(line, sizeof(line), f)) {
-        std::string sline(line);
+    // Read line by line using fgets with growing buffer
+    char chunk[4096];
+    while (fgets(chunk, sizeof(chunk), f)) {
+        std::string sline(chunk);
+        // If line was truncated (no newline and buffer full), read more
+        while (!sline.empty() && sline.back() != '\n' && sline.size() >= sizeof(chunk) - 1) {
+            // Line was truncated — read continuation
+            if (fgets(chunk, sizeof(chunk), f)) {
+                sline += chunk;
+            } else {
+                break;  // EOF
+            }
+        }
         // Trim trailing newline
         if (!sline.empty() && sline.back() == '\n') sline.pop_back();
         if (sline.empty() || sline[0] == '#') continue;
@@ -1997,12 +2010,12 @@ static bool load_note_from_file(const std::string& fn_utf8, NoteData* nd) {
                 // Parse params
                 char* str = (char*)sline.c_str();
                 char* tok;
-                tok = strstr(str, "w="); if(tok) curStroke->w = atof(tok+2);
-                tok = strstr(str, "r="); if(tok) curStroke->r = atof(tok+2);
-                tok = strstr(str, "g="); if(tok) curStroke->g = atof(tok+2);
-                tok = strstr(str, "b="); if(tok) curStroke->b = atof(tok+2);
-                tok = strstr(str, "a="); if(tok) curStroke->a = atof(tok+2);
-                tok = strstr(str, "t="); if(tok) curStroke->tool = atoi(tok+2);
+                tok = strstr((const char*)str, "w="); if(tok) curStroke->w = atof(tok+2);
+                tok = strstr((const char*)str, "r="); if(tok) curStroke->r = atof(tok+2);
+                tok = strstr((const char*)str, "g="); if(tok) curStroke->g = atof(tok+2);
+                tok = strstr((const char*)str, "b="); if(tok) curStroke->b = atof(tok+2);
+                tok = strstr((const char*)str, "a="); if(tok) curStroke->a = atof(tok+2);
+                tok = strstr((const char*)str, "t="); if(tok) curStroke->tool = atoi(tok+2);
                 continue;
             }
 
@@ -2018,13 +2031,13 @@ static bool load_note_from_file(const std::string& fn_utf8, NoteData* nd) {
                 pg->texts.push_back(TxtEl());
                 TxtEl* t = &pg->texts.back();
                 char* tok;
-                tok = strstr((char*)sline.c_str(), "x="); if(tok) t->x = atof(tok+2);
-                tok = strstr((char*)sline.c_str(), "y="); if(tok) t->y = atof(tok+2);
-                tok = strstr((char*)sline.c_str(), "fs="); if(tok) t->fontSize = atof(tok+3);
-                tok = strstr((char*)sline.c_str(), "r="); if(tok) t->r = atof(tok+2);
-                tok = strstr((char*)sline.c_str(), "g="); if(tok) t->g = atof(tok+2);
-                tok = strstr((char*)sline.c_str(), "b="); if(tok) t->b = atof(tok+2);
-                tok = strstr((char*)sline.c_str(), "txt="); if(tok) t->text = tok+4;
+                tok = strstr((const char*)sline.c_str(), "x="); if(tok) t->x = atof(tok+2);
+                tok = strstr((const char*)sline.c_str(), "y="); if(tok) t->y = atof(tok+2);
+                tok = strstr((const char*)sline.c_str(), "fs="); if(tok) t->fontSize = atof(tok+3);
+                tok = strstr((const char*)sline.c_str(), "r="); if(tok) t->r = atof(tok+2);
+                tok = strstr((const char*)sline.c_str(), "g="); if(tok) t->g = atof(tok+2);
+                tok = strstr((const char*)sline.c_str(), "b="); if(tok) t->b = atof(tok+2);
+                tok = strstr((const char*)sline.c_str(), "txt="); if(tok) t->text = tok+4;
                 continue;
             }
 
@@ -2032,11 +2045,11 @@ static bool load_note_from_file(const std::string& fn_utf8, NoteData* nd) {
                 pg->images.push_back(ImgEl());
                 ImgEl* img = &pg->images.back();
                 char* tok;
-                tok = strstr((char*)sline.c_str(), "x="); if(tok) img->x = atof(tok+2);
-                tok = strstr((char*)sline.c_str(), "y="); if(tok) img->y = atof(tok+2);
-                tok = strstr((char*)sline.c_str(), "w="); if(tok) img->w = atof(tok+2);
-                tok = strstr((char*)sline.c_str(), "h="); if(tok) img->h = atof(tok+2);
-                tok = strstr((char*)sline.c_str(), "src="); if(tok) img->srcFile = tok+4;
+                tok = strstr((const char*)sline.c_str(), "x="); if(tok) img->x = atof(tok+2);
+                tok = strstr((const char*)sline.c_str(), "y="); if(tok) img->y = atof(tok+2);
+                tok = strstr((const char*)sline.c_str(), "w="); if(tok) img->w = atof(tok+2);
+                tok = strstr((const char*)sline.c_str(), "h="); if(tok) img->h = atof(tok+2);
+                tok = strstr((const char*)sline.c_str(), "src="); if(tok) img->srcFile = tok+4;
 
                 // Resolve path relative to note directory and validate
                 std::string imgPath = img->srcFile;
@@ -2074,11 +2087,11 @@ static bool load_note_from_file(const std::string& fn_utf8, NoteData* nd) {
             }
 
             if (sline.substr(0, 3) == "bg ") {
-                char* tok = strstr((char*)sline.c_str(), "src=");
+                char* tok = strstr((const char*)sline.c_str(), "src=");
                 if (tok) {
                     pg->bgFile = tok + 4;
-                    tok = strstr((char*)sline.c_str(), "w="); if(tok) pg->bgW = atof(tok+2);
-                    tok = strstr((char*)sline.c_str(), "h="); if(tok) pg->bgH = atof(tok+2);
+                    tok = strstr((const char*)sline.c_str(), "w="); if(tok) pg->bgW = atof(tok+2);
+                    tok = strstr((const char*)sline.c_str(), "h="); if(tok) pg->bgH = atof(tok+2);
 
                     // Validate and resolve background path
                     std::string bgPath = pg->bgFile;
