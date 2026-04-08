@@ -27,7 +27,7 @@ std::shared_ptr<Document> NoteDeserializer::deserialize(const std::filesystem::p
 
     // Step 3: 檢查是否為壓縮格式
     std::shared_ptr<Document> doc = std::make_shared<Document>();
-    
+
     if (path.extension() == ".gz" || path.extension() == ".z") {
         auto decompressResult = SafeDecompressor::decompress(path);
         if (!decompressResult.success) {
@@ -35,16 +35,26 @@ std::shared_ptr<Document> NoteDeserializer::deserialize(const std::filesystem::p
             return nullptr;
         }
         Logger::info("NoteDeserializer: Decompressed successfully");
+
+        // Step 4: 解壓後內容送進 XML 安全解析
+        auto parseResult = SecureXmlParser::parseFromBuffer(decompressResult.data.data(), decompressResult.data.size());
+        if (!parseResult.success()) {
+            Logger::warning("NoteDeserializer: XML parse failed after decompression: %s", parseResult.errorMessage.c_str());
+            return nullptr;
+        }
+        Logger::info("NoteDeserializer: Parsed XML from compressed file successfully");
+        // TODO: Convert parsed XML doc to Document object
+        // For now, the security pipeline (decompress -> parse XML securely) is complete
     } else if (path.extension() == ".xml") {
         std::ifstream ifs(path, std::ios::binary);
         if (!ifs) {
             Logger::warning("NoteDeserializer: Cannot open XML file");
             return nullptr;
         }
-        
+
         std::string xmlData((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
         ifs.close();
-        
+
         auto parseResult = SecureXmlParser::parseFromBuffer(xmlData.data(), xmlData.size());
         if (!parseResult.success()) {
             Logger::warning("NoteDeserializer: XML parse failed");

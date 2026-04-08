@@ -13,7 +13,7 @@ set(DEP_CAIRO_PKG_NAME     "cairo")
 
 # ── Poppler
 set(DEP_POPPLER_MIN_VERSION "0.82.0")
-set(DEP_POPPLER_TESTED_MAX_VERSION "22.99.0")
+set(DEP_POPPLER_TESTED_MAX_VERSION "26.99.0")
 set(DEP_POPPLER_PKG_NAME   "poppler-glib")
 
 # ── GDK-Pixbuf

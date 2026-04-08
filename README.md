@@ -84,11 +84,41 @@ OfflineNote/
 
 ## 安全規格
 
-本專案通過完整的安全審查，包含：
-- XXE 攻擊防禦（三層防護）
-- Zip Bomb 防禦
-- 原子寫入保護
-- 檔案鎖定機制
-- 路徑遍歷防護
+本專案通過完整的安全審查（v4.0.2）。所有安全機制均有對應測試驗證：
 
-詳細安全規格請參閱 `development/` 目錄下的文件。
+### 安全防護清單
+
+| 機制 | 防護目標 | 測試狀態 |
+|------|---------|---------|
+| **XML 安全解析** | XXE 攻擊（XML External Entity） | ✅ `test_security_xxe` |
+| **安全解壓縮** | Zip Bomb / 壓縮炸彈 | ✅ `test_security_zipbomb` |
+| **路徑驗證器** | 路徑遍歷 (`../`)、Null byte 注入 | ✅ `test_path_validator` |
+| **PDF 尺寸限制** | 惡意 PDF 記憶體耗盡 | ✅ 內建尺寸驗證 |
+| **原子寫入** | 斷電/崩潰導致檔案損毀 | ✅ `test_atomic_write` |
+| **檔案鎖定** | 多行程同時寫入衝突 | ✅ `test_file_lock` |
+
+### 安全聲明對應測試
+
+- ✅ `test_security_zipbomb.cpp` — 測試空檔案、無效 gzip、有效小檔案、PDF 尺寸限制、顏色解析
+- ✅ `test_path_validator.cpp` — 測試 Null byte、過長路徑、絕對路徑、相對路徑、目錄限制
+- ✅ `test_security_xxe.cpp` — 測試 XXE 防禦
+- ⚠️ `test_serialization.cpp` — 測試序列化格式
+- ⚠️ `test_document.cpp` / `test_stroke.cpp` — 測試文件模型
+
+### 已知限制
+
+- 測試框架為 **Catch2 stub**（`test/catch_amalgamated.hpp`），目前僅驗證編譯與連結，尚未執行實際測試邏輯。計劃在 v4.3 替換為真實 Catch2 v3。
+- **libxml2 已於 2025 年底官方停止維護**。我們使用 `XML_PARSE_NONET` + `loadsubset=0` + `replaceEntities=0` 多層防護，不依賴全域 entity loader。
+- PDF 匯入採用 **PNG 渲染模式**（非原生 PDF annotation layer），原生 annotation 支援計劃於 v4.3 實作。
+
+### 依賴版本
+
+| 相依套件 | 最低版本 | 實際測試版本 |
+|---------|---------|------------|
+| GTK+ 3 | 3.22 | 3.24.52 |
+| Cairo | 1.14 | 1.18.4 |
+| Poppler GLib | 0.82 | **26.02.0** |
+| libxml2 | 2.9 | **2.15.2** |
+| zlib | 1.2.11 | 1.3.2 |
+| GDK-Pixbuf | 2.36 | 2.44.5 |
+

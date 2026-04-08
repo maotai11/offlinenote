@@ -8,7 +8,10 @@
 #include <sstream>
 #include <iomanip>
 
-#define TEST_CASE(name, ...) void TEST_FUNC_##__LINE__(); void TEST_FUNC_##__LINE__()
+// Simple stub: each TEST_CASE becomes a unique function via __COUNTER__
+#define CONCAT2(a, b) a##b
+#define CONCAT1(a, b) CONCAT2(a, b)
+#define TEST_CASE(name, ...) void CONCAT1(test_fn_, __COUNTER__)(); void CONCAT1(test_fn_, __COUNTER__)()
 #define SECTION(name) if(true)
 #define REQUIRE(x) do { if(!(x)) { std::cerr << "REQUIRE failed: " << #x << " at line " << __LINE__ << std::endl; exit(1); } } while(0)
 #define REQUIRE_FALSE(x) REQUIRE(!(x))

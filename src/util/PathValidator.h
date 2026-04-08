@@ -7,8 +7,9 @@
 #include <string>
 
 enum class PathValidationPolicy {
-    AllowAnyAbsolute,
-    RestrictToDirectory,
+    AllowAnyPath,          // Allow any path (will be canonicalized to absolute)
+    RequireAbsolutePath,   // Require absolute path (deprecated, same as AllowAnyPath but clearer name)
+    RestrictToDirectory,   // Must be within allowedRoot
 };
 
 struct PathValidationResult {
@@ -21,7 +22,7 @@ class PathValidator {
 public:
     static PathValidationResult validatePath(
         const std::filesystem::path& inputPath,
-        PathValidationPolicy policy = PathValidationPolicy::AllowAnyAbsolute,
+        PathValidationPolicy policy = PathValidationPolicy::AllowAnyPath,
         const std::filesystem::path& allowedRoot = {}
     );
 

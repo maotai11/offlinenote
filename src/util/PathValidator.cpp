@@ -84,6 +84,8 @@ PathValidationResult PathValidator::validatePath(
             return result;
         }
     }
+    // AllowAnyPath / RequireAbsolutePath: just canonical, no further checks
+    // Note: RequireAbsolutePath is deprecated and behaves identically to AllowAnyPath
 
     result.valid = true;
     result.canonical = canonical;
@@ -96,7 +98,7 @@ PathValidationResult PathValidator::validatePdfPath(
 {
     if (fromUserFileDialog) {
         // 使用者從檔案對話框選擇的路徑：允許任意絕對路徑
-        return validatePath(path, PathValidationPolicy::AllowAnyAbsolute);
+        return validatePath(path, PathValidationPolicy::AllowAnyPath);
     }
     else {
         // 來自 .onote 嵌入路徑：必須更嚴格，限制在資源目錄內

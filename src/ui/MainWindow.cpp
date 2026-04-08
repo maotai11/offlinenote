@@ -1933,12 +1933,19 @@ static void on_page_orientation(GtkButton*, gpointer) {
 static std::string get_save_dir() {
     // Use exe directory - most reliable for portable apps
     std::string exeDir = get_exe_dir();
-    std::string dir = exeDir + "/data/notes";
+    logInfo("get_save_dir: exeDir=[%s]", exeDir.c_str());
+
+    // Use forward slashes for cross-platform compatibility (Windows supports them)
+    std::string dir = exeDir;
+    for (auto& c : dir) if (c == '\\') c = '/';
+    dir += "/data/notes";
+    logInfo("get_save_dir: final=[%s]", dir.c_str());
 
     // Ensure directory exists
     std::error_code ec;
     fs::create_directories(fs::path(dir), ec);
     if (ec) {
+        logInfo("get_save_dir: create_directories failed, falling back to home");
         // Fallback to user home
         dir = std::string(g_get_home_dir()) + "/OfflineNote/notes";
         fs::create_directories(fs::path(dir), ec);
@@ -1977,23 +1984,62 @@ static std::wstring utf8_to_wide(const std::string& utf8) {
 // Helper: Open file with wide string path, returns FILE* or nullptr
 static FILE* wfopen_utf8(const std::string& path_utf8, const wchar_t* mode) {
     std::wstring wpath = utf8_to_wide(path_utf8);
-    return _wfopen(wpath.c_str(), mode);
+    
+    // Debug: ensure directory exists first
+    try {
+        fs::path parentDir = fs::path(wpath).parent_path();
+        std::error_code ec;
+        if (!fs::exists(parentDir, ec)) {
+            logInfo("wfopen_utf8: creating dir %s", parentDir.u8string().c_str());
+            fs::create_directories(parentDir, ec);
+            if (ec) {
+                logInfo("wfopen_utf8: create_directories failed: %s", ec.message().c_str());
+            }
+        }
+    } catch (...) {
+        logInfo("wfopen_utf8: exception checking/creating parent dir");
+    }
+    
+    FILE* f = _wfopen(wpath.c_str(), mode);
+    if (!f) {
+        logInfo("wfopen_utf8: _wfopen failed for %s (errno=%d)", path_utf8.c_str(), errno);
+    }
+    return f;
 }
 
-// Helper: Get exe directory using Windows API (most reliable)
+// Helper: Get exe directory using std::filesystem (most reliable, no encoding issues)
 static std::string get_exe_dir() {
-    wchar_t wPath[MAX_PATH];
-    DWORD len = GetModuleFileNameW(nullptr, wPath, MAX_PATH);
-    if (len > 0 && len < MAX_PATH) {
-        std::wstring ws(wPath);
-        size_t pos = ws.find_last_of(L"\\/");
-        if (pos != std::string::npos) {
-            std::wstring wDir = ws.substr(0, pos);
-            return wstring_to_utf8(wDir);
+    // Method 1: Try to find offlinenote.exe in current directory
+    try {
+        fs::path cwd = fs::current_path();
+        fs::path exePath = cwd / "offlinenote.exe";
+        if (fs::exists(exePath)) {
+            return cwd.u8string();
         }
-    }
+    } catch (...) {}
+
+    // Method 2: Use Windows API with proper null-termination
+    try {
+        wchar_t wPath[MAX_PATH] = {0};  // Zero-initialize buffer
+        DWORD len = GetModuleFileNameW(nullptr, wPath, MAX_PATH);
+        if (len > 0 && len < MAX_PATH) {
+            // Create wstring with correct length only (no trailing garbage)
+            std::wstring ws(wPath, len);
+            size_t pos = ws.find_last_of(L"\\/");
+            if (pos != std::wstring::npos && pos > 0) {
+                std::wstring wDir = ws.substr(0, pos);
+                // Convert using fs::path for safety
+                return fs::path(wDir).u8string();
+            }
+        }
+    } catch (...) {}
+
     // Fallback
-    return ".";
+    try {
+        return fs::current_path().u8string();
+    } catch (...) {
+        return ".";
+    }
 }
 
 // ── Undo/Redo: Serialize/Deserialize to string ──
@@ -2433,10 +2479,14 @@ static void on_save(GtkButton*, gpointer) {
         gtk_label_set_text(GTK_LABEL(G.lblStatus), "已儲存");
     } else {
         std::string fn = note_filename(n);
-        char errMsg[512];
+        // Escape backslashes for GTK message dialog (\ -> \\)
+        std::string safeDir, safeFn;
+        for (char c : saveDir) { safeDir += c; if (c == '\\') safeDir += '\\'; }
+        for (char c : fn) { safeFn += c; if (c == '\\') safeFn += '\\'; }
+        char errMsg[1024];
         snprintf(errMsg, sizeof(errMsg),
             "儲存失敗！\n\n儲存目錄: %s\n檔案: %s\n筆記名稱: %s\n\n請確認有寫入權限。",
-            saveDir.c_str(), fn.c_str(), n->name.c_str());
+            safeDir.c_str(), safeFn.c_str(), n->name.c_str());
         GtkWidget* err = gtk_message_dialog_new(GTK_WINDOW(G.window), GTK_DIALOG_MODAL,
             GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "%s", errMsg);
         gtk_dialog_run(GTK_DIALOG(err)); gtk_widget_destroy(err);

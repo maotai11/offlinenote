@@ -39,8 +39,6 @@ public:
     static ParseResult parseFromBuffer(const char* buffer, size_t bufferSize,
                                         size_t maxSizeBytes = 64ULL * 1024 * 1024);
 private:
-    static xmlParserInputPtr noOpEntityLoader(const char*, const char*, xmlParserCtxtPtr);
-    static void installGlobalNoOpLoader();
     static void applyContextSecurityOptions(xmlParserCtxtPtr ctxt);
     struct ErrorAccumulator {
         std::string text;

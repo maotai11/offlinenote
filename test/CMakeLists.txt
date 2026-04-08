@@ -7,6 +7,7 @@ pkg_check_modules(LIBXML2 REQUIRED libxml-2.0>=2.9)
 pkg_check_modules(CAIRO REQUIRED cairo>=1.14)
 pkg_check_modules(GDK_PIXBUF REQUIRED gdk-pixbuf-2.0>=2.36)
 pkg_check_modules(POPPLER REQUIRED poppler-glib>=0.82)
+pkg_check_modules(ZLIB REQUIRED zlib>=1.2)
 
 function(add_onote_test name sources)
     add_executable(${name} ${sources} test_winmain_stub.cpp)
@@ -17,6 +18,7 @@ function(add_onote_test name sources)
         ${CAIRO_INCLUDE_DIRS}
         ${GDK_PIXBUF_INCLUDE_DIRS}
         ${POPPLER_INCLUDE_DIRS}
+        ${ZLIB_INCLUDE_DIRS}
     )
     target_link_libraries(${name} PRIVATE
         ${GLIB2_LIBRARIES}
@@ -24,6 +26,7 @@ function(add_onote_test name sources)
         ${CAIRO_LIBRARIES}
         ${GDK_PIXBUF_LIBRARIES}
         ${POPPLER_LIBRARIES}
+        ${ZLIB_LIBRARIES}
     )
     # Ensure console subsystem on Windows — prevents linker from selecting WinMain
     if(WIN32)

@@ -5,12 +5,43 @@
 #include "PdfImporter.h"
 #include <poppler.h>
 #include <cairo.h>
+#include "../util/SafeArithmetic.h"
+#include "../util/Logger.h"
 #include <filesystem>
 #include <vector>
 #include <string>
 #include <cstdio>
+#include <algorithm>
+#include <cmath>
 
 namespace fs = std::filesystem;
+
+// PDF 頁面尺寸上限（pt），防止惡意 PDF 耗盡記憶體
+// A0 最大邊約 3370pt，放寬 2 倍到 7000pt 仍合理
+static constexpr double MAX_PDF_PAGE_DIMENSION_PT = 7000.0;
+
+// 渲染像素上限（px），對應 CAIRO_MAX_IMAGE_SURFACE_DIM
+static constexpr double MAX_RENDERED_PX = 16000.0; // 保守值，小於 Cairo 32767
+
+static bool isValidPdfPageSize(double width, double height) {
+    if (!std::isfinite(width) || !std::isfinite(height)) return false;
+    if (width <= 0.0 || height <= 0.0) return false;
+    if (width > MAX_PDF_PAGE_DIMENSION_PT || height > MAX_PDF_PAGE_DIMENSION_PT) return false;
+    // 檢查渲染後像素尺寸
+    double scale = 300.0 / 72.0; // 最大 DPI
+    double renderedW = width * scale;
+    double renderedH = height * scale;
+    if (renderedW > MAX_RENDERED_PX || renderedH > MAX_RENDERED_PX) return false;
+    // 總像素不超過 256MP（約 16000x16000）
+    double totalPixels = renderedW * renderedH;
+    if (totalPixels > 256000000.0) return false;
+    return true;
+}
+
+static double clampPageSize(double v) {
+    if (std::isnan(v) || v <= 0.0) return 0.0;
+    return std::min(v, MAX_PDF_PAGE_DIMENSION_PT);
+}
 
 struct PdfPageResult {
     cairo_surface_t* surface;  // caller owns this
@@ -46,6 +77,14 @@ static PdfPageResult renderPdfPageToSurface(const std::string& pdfPath, int page
 
     double width, height;
     poppler_page_get_size(page, &width, &height);
+
+    // Security: validate page dimensions before rendering
+    if (!isValidPdfPageSize(width, height)) {
+        Logger::warning("PdfImporter: REJECTED page with excessive dimensions");
+        g_object_unref(page);
+        g_object_unref(doc);
+        return result;
+    }
 
     // 渲染為 cairo image surface (300 DPI)
     double scale = 300.0 / 72.0;
@@ -117,6 +156,13 @@ std::vector<PdfImportedPage> PdfImporter::importPdf(const std::string& pdfPath, 
 
         double width, height;
         poppler_page_get_size(page, &width, &height);
+
+        // Security: validate page dimensions before rendering
+        if (!isValidPdfPageSize(width, height)) {
+            Logger::warning("PdfImporter: SKIPPING page with excessive dimensions");
+            g_object_unref(page);
+            continue;
+        }
 
         // 渲染為 PNG (150 DPI — 縮圖品質，平衡速度與品質)
         double scale = 150.0 / 72.0;

@@ -4,7 +4,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(OfflineNote
-    VERSION 4.0.0
+    VERSION 4.0.2
     DESCRIPTION "Offline-first handwriting and PDF annotation desktop application"
     HOMEPAGE_URL "https://github.com/maotai11/offlinenote"
     LANGUAGES CXX C
@@ -19,7 +19,7 @@ include(CompilerFlags)
 include(DependencyVersions)
 include(InstallDirs)
 
-option(OFFLINENOTE_BUILD_TESTS "Build tests" OFF)
+option(OFFLINENOTE_BUILD_TESTS "Build tests" ON)
 option(OFFLINENOTE_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 
 # ──────────────────────────────────────────────
