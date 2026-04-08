@@ -107,9 +107,14 @@ static struct {
 
     // Overlay for text entry (GtkOverlay wrapping drawingArea + text widgets)
     GtkWidget* overlay = nullptr;
-    GtkWidget* textEntry = nullptr;
-    GtkWidget* textSizeSpin = nullptr;
-    GtkWidget* textOverlayBox = nullptr; // Box holding entry+spin
+    GtkWidget* textEntry = nullptr;       // GtkEntry for single-line
+    GtkWidget* textSizeSpin = nullptr;    // Font size spinner
+    GtkWidget* textMultiView = nullptr;   // GtkTextView for multi-line
+    GtkWidget* textMultiScrolled = nullptr;
+    GtkWidget* textOverlayBox = nullptr;  // Box holding entry+spin
+    GtkWidget* textMultiBox = nullptr;    // Box for multi-line mode (view + buttons)
+    int textEditMode = 0;                 // 0=new text, 1=edit existing
+    int textEditIdx = -1;                 // Index of text being edited
     double textEntryX = 0, textEntryY = 0;
 
     int drawing = 0;
@@ -243,8 +248,16 @@ static void updateStatus() {
     int nst = pg ? (int)pg->strokes.size() : 0;
     int ntx = pg ? (int)pg->texts.size() : 0;
     int nim = pg ? (int)pg->images.size() : 0;
-    snprintf(buf, sizeof(buf), "%s %s %d/%d 筆:%d 文:%d 圖:%d | %s",
-             nn, ori, G.selPage+1, npg, nst, ntx, nim, TOOL_NAMES[G.tool]);
+
+    // Show multi-selection count
+    char selInfo[64] = "";
+    int totalSel = G.selTexts.size() + G.selStrokes.size() + G.selImages.size();
+    if (totalSel > 0) {
+        snprintf(selInfo, sizeof(selInfo), " [已選%d]", totalSel);
+    }
+
+    snprintf(buf, sizeof(buf), "%s %s %d/%d 筆:%d 文:%d 圖:%d%s | %s",
+             nn, ori, G.selPage+1, npg, nst, ntx, nim, selInfo, TOOL_NAMES[G.tool]);
     gtk_label_set_text(GTK_LABEL(G.lblStatus), buf);
     if (G.lblZoom) {
         char z[64];
@@ -342,14 +355,17 @@ static void on_prop_color_changed(GtkWidget* btn, gpointer) {
 }
 
 // ============================================================
-// Text entry using GtkOverlay - simple and robust
+// Text entry - multi-line support with edit capability
 // ============================================================
-static void hideTextEntry() {
-    if (!G.textOverlayBox) return;
-    if (!gtk_widget_get_visible(G.textOverlayBox)) return;
+static void commitTextEntry() {
+    // Get text from multi-line view
+    GtkTextBuffer* buf = G.textMultiView ? gtk_text_view_get_buffer(GTK_TEXT_VIEW(G.textMultiView)) : nullptr;
+    if (!buf) return;
 
-    // Save data before hiding
-    const char* txt = G.textEntry ? gtk_entry_get_text(GTK_ENTRY(G.textEntry)) : "";
+    GtkTextIter start, end;
+    gtk_text_buffer_get_bounds(buf, &start, &end);
+    gchar* txt = gtk_text_buffer_get_text(buf, &start, &end, FALSE);
+
     PageData* pg = curPage();
     if (pg && txt && strlen(txt) > 0) {
         int fs = 14;
@@ -358,74 +374,150 @@ static void hideTextEntry() {
         double px = (G.textEntryX - G.margins[0]) / G.zoom;
         double py = (G.textEntryY - G.margins[1]) / G.zoom;
 
-        pg->texts.push_back(TxtEl());
-        TxtEl* t = &pg->texts.back();
-        t->text = txt;
-        t->x = fmax(0.0, px);
-        t->y = fmax(0.0, py);
-        t->fontSize = fs;
-        t->r = G.penR; t->g = G.penG; t->b = G.penB;
+        if (G.textEditMode && G.textEditIdx >= 0 && G.textEditIdx < (int)pg->texts.size()) {
+            // Edit existing text
+            pg->texts[G.textEditIdx].text = txt;
+            pg->texts[G.textEditIdx].fontSize = fs;
+            G.textEditMode = 0;
+            G.textEditIdx = -1;
+        } else {
+            // New text
+            pg->texts.push_back(TxtEl());
+            TxtEl* t = &pg->texts.back();
+            t->text = txt;
+            t->x = fmax(0.0, px);
+            t->y = fmax(0.0, py);
+            t->fontSize = fs;
+            t->r = G.penR; t->g = G.penG; t->b = G.penB;
+        }
         NoteData* nd = curNote(); if(nd) nd->dirty = 1;
     }
 
+    g_free(txt);
+
     // Clear and hide
-    if (G.textEntry) gtk_entry_set_text(GTK_ENTRY(G.textEntry), "");
-    gtk_widget_hide(G.textOverlayBox);
+    if (buf) gtk_text_buffer_set_text(buf, "", -1);
+    if (G.textMultiBox) gtk_widget_hide(G.textMultiBox);
+    G.textEditMode = 0;
+    G.textEditIdx = -1;
 
     // Force full canvas redraw
     if (G.canvasSurf) { cairo_surface_destroy(G.canvasSurf); G.canvasSurf = nullptr; }
     renderCanvas();
 }
 
-static void ensureTextOverlay() {
-    if (G.textOverlayBox) return;
-
-    G.textOverlayBox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
-    gtk_widget_set_valign(G.textOverlayBox, GTK_ALIGN_START);
-    gtk_widget_set_halign(G.textOverlayBox, GTK_ALIGN_START);
-    gtk_widget_set_visible(G.textOverlayBox, FALSE);
-
-    G.textEntry = gtk_entry_new();
-    gtk_entry_set_placeholder_text(GTK_ENTRY(G.textEntry), "輸入文字 (Enter 完成)");
-    gtk_widget_set_size_request(G.textEntry, 200, -1);
-    gtk_widget_set_tooltip_text(G.textEntry,
-        "文字工具操作指南:\n"
-        "• 輸入文字後按 Enter 完成\n"
-        "• 選取工具可拖曳已輸入的文字\n"
-        "• 多行文字：請分多次輸入");
-    gtk_box_pack_start(GTK_BOX(G.textOverlayBox), G.textEntry, TRUE, TRUE, 0);
-
-    G.textSizeSpin = gtk_spin_button_new_with_range(8, 72, 1);
-    gtk_spin_button_set_value(GTK_SPIN_BUTTON(G.textSizeSpin), 14);
-    gtk_widget_set_size_request(G.textSizeSpin, 50, -1);
-    gtk_box_pack_start(GTK_BOX(G.textOverlayBox), G.textSizeSpin, FALSE, FALSE, 0);
-
-    gtk_overlay_add_overlay(GTK_OVERLAY(G.overlay), G.textOverlayBox);
-
-    // Connect signals ONCE
-    g_signal_connect(G.textEntry, "activate", G_CALLBACK(+[](GtkEntry*, gpointer) {
-        hideTextEntry();
-    }), nullptr);
-    g_signal_connect(G.textEntry, "focus-out-event", G_CALLBACK(+[](GtkWidget*, GdkEventFocus*, gpointer) -> gboolean {
-        hideTextEntry();
-        return FALSE;
-    }), nullptr);
-}
-
-static void showTextEntry(double sx, double sy) {
-    hideTextEntry();
+static void showTextEditor(double sx, double sy, const char* existingText = nullptr) {
     if (!G.drawingArea || !G.overlay) return;
 
     G.textEntryX = sx;
     G.textEntryY = sy;
 
-    ensureTextOverlay();
+    if (!G.textMultiBox) {
+        // Create multi-line text editor
+        G.textMultiBox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+        gtk_widget_set_valign(G.textMultiBox, GTK_ALIGN_START);
+        gtk_widget_set_halign(G.textMultiBox, GTK_ALIGN_START);
+        gtk_widget_set_visible(G.textMultiBox, FALSE);
 
-    // Position using margin
-    gtk_widget_set_margin_start(G.textOverlayBox, (int)sx);
-    gtk_widget_set_margin_top(G.textOverlayBox, (int)sy);
-    gtk_widget_show_all(G.textOverlayBox);
-    gtk_widget_grab_focus(G.textEntry);
+        // Scrolled window for text view
+        G.textMultiScrolled = gtk_scrolled_window_new(nullptr, nullptr);
+        gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(G.textMultiScrolled),
+            GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+        gtk_widget_set_size_request(G.textMultiScrolled, 300, 120);
+
+        G.textMultiView = gtk_text_view_new();
+        gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(G.textMultiView), GTK_WRAP_WORD_CHAR);
+        gtk_container_add(GTK_CONTAINER(G.textMultiScrolled), G.textMultiView);
+
+        gtk_box_pack_start(GTK_BOX(G.textMultiBox), G.textMultiScrolled, TRUE, TRUE, 0);
+
+        // Button bar: 字型大小 + 換行 + 完成 + 取消
+        GtkWidget* btnBar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+
+        G.textSizeSpin = gtk_spin_button_new_with_range(8, 72, 1);
+        gtk_spin_button_set_value(GTK_SPIN_BUTTON(G.textSizeSpin), 14);
+        gtk_widget_set_size_request(G.textSizeSpin, 50, -1);
+        gtk_box_pack_start(GTK_BOX(btnBar), G.textSizeSpin, FALSE, FALSE, 0);
+
+        // 換行 button - inserts newline at cursor
+        GtkWidget* btnNewline = gtk_button_new_with_label("↵ 換行");
+        gtk_widget_set_size_request(btnNewline, 60, -1);
+        g_signal_connect(btnNewline, "clicked", G_CALLBACK(+[](GtkButton*, gpointer) {
+            GtkTextBuffer* buf = G.textMultiView ? gtk_text_view_get_buffer(GTK_TEXT_VIEW(G.textMultiView)) : nullptr;
+            if (!buf) return;
+            GtkTextIter iter;
+            gtk_text_buffer_get_iter_at_mark(buf, &iter, gtk_text_buffer_get_insert(buf));
+            gtk_text_buffer_insert(buf, &iter, "\n", -1);
+            // Re-focus the text view
+            gtk_widget_grab_focus(G.textMultiView);
+        }), nullptr);
+        gtk_box_pack_start(GTK_BOX(btnBar), btnNewline, FALSE, FALSE, 0);
+
+        // 完成 button
+        GtkWidget* btnDone = gtk_button_new_with_label("✓ 完成");
+        gtk_widget_set_size_request(btnDone, 60, -1);
+        g_signal_connect(btnDone, "clicked", G_CALLBACK(+[](GtkButton*, gpointer) {
+            commitTextEntry();
+        }), nullptr);
+        gtk_box_pack_start(GTK_BOX(btnBar), btnDone, FALSE, FALSE, 0);
+
+        // 取消 button
+        GtkWidget* btnCancel = gtk_button_new_with_label("✗ 取消");
+        gtk_widget_set_size_request(btnCancel, 60, -1);
+        g_signal_connect(btnCancel, "clicked", G_CALLBACK(+[](GtkButton*, gpointer) {
+            if (G.textMultiBox) gtk_widget_hide(G.textMultiBox);
+            G.textEditMode = 0;
+            G.textEditIdx = -1;
+            if (G.textMultiView) {
+                GtkTextBuffer* buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(G.textMultiView));
+                gtk_text_buffer_set_text(buf, "", -1);
+            }
+        }), nullptr);
+        gtk_box_pack_start(GTK_BOX(btnBar), btnCancel, FALSE, FALSE, 0);
+
+        gtk_box_pack_start(GTK_BOX(G.textMultiBox), btnBar, FALSE, FALSE, 0);
+
+        gtk_overlay_add_overlay(GTK_OVERLAY(G.overlay), G.textMultiBox);
+    }
+
+    // Set existing text if editing
+    if (existingText && strlen(existingText) > 0) {
+        GtkTextBuffer* buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(G.textMultiView));
+        gtk_text_buffer_set_text(buf, existingText, -1);
+    } else {
+        GtkTextBuffer* buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(G.textMultiView));
+        gtk_text_buffer_set_text(buf, "", -1);
+    }
+
+    // Position and show
+    gtk_widget_set_margin_start(G.textMultiBox, (int)sx);
+    gtk_widget_set_margin_top(G.textMultiBox, (int)sy);
+    gtk_widget_show_all(G.textMultiBox);
+    gtk_widget_grab_focus(G.textMultiView);
+}
+
+static void hideTextEntry() {
+    // Legacy compatibility - hide multi-line editor
+    if (G.textMultiBox) gtk_widget_hide(G.textMultiBox);
+    if (G.textOverlayBox) gtk_widget_hide(G.textOverlayBox);
+    if (G.canvasSurf) { cairo_surface_destroy(G.canvasSurf); G.canvasSurf = nullptr; }
+    renderCanvas();
+}
+
+static void ensureTextOverlay() {
+    // Legacy: kept for compatibility, actual work done in showTextEditor
+    if (G.textOverlayBox) return;
+    G.textOverlayBox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    gtk_widget_set_valign(G.textOverlayBox, GTK_ALIGN_START);
+    gtk_widget_set_halign(G.textOverlayBox, GTK_ALIGN_START);
+    gtk_widget_set_visible(G.textOverlayBox, FALSE);
+    G.textEntry = gtk_entry_new();
+    gtk_box_pack_start(GTK_BOX(G.textOverlayBox), G.textEntry, TRUE, TRUE, 0);
+    gtk_overlay_add_overlay(GTK_OVERLAY(G.overlay), G.textOverlayBox);
+}
+
+static void showTextEntry(double sx, double sy) {
+    showTextEditor(sx, sy);
 }
 
 // ============================================================
@@ -773,6 +865,15 @@ static gboolean on_btnpress(GtkWidget*, GdkEventButton* ev, gpointer) {
             // Very generous hit area
             double pad = 15.0;
             if (px >= tx-pad && px <= tx+tw+pad && py >= topY-pad && py <= bottomY+pad) {
+                // Double-click = Edit existing text
+                if (ev->type == GDK_2BUTTON_PRESS) {
+                    G.textEditMode = 1;
+                    G.textEditIdx = i;
+                    double sx = ev->x, sy = ev->y;
+                    showTextEditor(sx, sy, t->text.c_str());
+                    return TRUE;
+                }
+
                 G.selTxt = i;
                 G.dragging = 1;
                 G.dragOffX = t->x - px;  // offset from click to text origin
@@ -883,10 +984,14 @@ static gboolean on_btnrelease(GtkWidget*, GdkEventButton*, gpointer) {
                     }
                 }
             }
-            // Select all images in box
+            // Select all images in box (any part inside)
             for (int i = 0; i < (int)pg->images.size(); i++) {
                 ImgEl* img = &pg->images[i];
-                if (img->x >= bx && img->x <= bx+bw && img->y >= by && img->y <= by+bh) {
+                double ix1 = img->x, iy1 = img->y;
+                double ix2 = img->x + img->w, iy2 = img->y + img->h;
+                // Check if any corner is inside the box, or if box overlaps image
+                bool overlap = !(ix2 < bx || ix1 > bx+bw || iy2 < by || iy1 > by+bh);
+                if (overlap) {
                     G.selImages.push_back(i);
                 }
             }
