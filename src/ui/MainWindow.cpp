@@ -3252,6 +3252,10 @@ MainWindow::MainWindow(GtkApplication* app, AppController& ctrl) : app_(app), co
         "}\n"
         "list row:hover {\n"
         "  background-color: #e8f0fe;\n"
+        "}\n"
+        ".sidebar-label {\n"
+        "  font-weight: bold;\n"
+        "  margin: 4px;\n"
         "}\n",
         -1, nullptr);
     gtk_style_context_add_provider_for_screen(gdk_screen_get_default(),
@@ -3344,31 +3348,49 @@ MainWindow::MainWindow(GtkApplication* app, AppController& ctrl) : app_(app), co
     GtkToolItem* si=gtk_tool_item_new();gtk_container_add(GTK_CONTAINER(si),sc);gtk_toolbar_insert(toolbar,si,-1);
     gtk_box_pack_start(GTK_BOX(mainBox), GTK_WIDGET(toolbar), FALSE, FALSE, 0);
 
-    // ── Content area ──
+    // ── Content area: Drawing area (centered) + Right sidebar ──
     GtkWidget* contentBox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
     gtk_box_pack_start(GTK_BOX(mainBox), contentBox, TRUE, TRUE, 0);
 
-    // Sidebar
+    // Drawing area wrapped in GtkOverlay (takes most space, centered)
+    G.overlay = gtk_overlay_new();
+    G.drawingArea = gtk_drawing_area_new();
+    gtk_widget_set_events(G.drawingArea,
+        GDK_EXPOSURE_MASK|GDK_BUTTON_PRESS_MASK|GDK_BUTTON_RELEASE_MASK|
+        GDK_POINTER_MOTION_MASK|GDK_SCROLL_MASK|GDK_KEY_PRESS_MASK);
+    g_signal_connect(G.drawingArea,"draw",G_CALLBACK(on_draw),nullptr);
+    g_signal_connect(G.drawingArea,"button-press-event",G_CALLBACK(on_btnpress),nullptr);
+    g_signal_connect(G.drawingArea,"button-release-event",G_CALLBACK(on_btnrelease),nullptr);
+    g_signal_connect(G.drawingArea,"motion-notify-event",G_CALLBACK(on_motion),nullptr);
+    g_signal_connect(G.drawingArea,"scroll-event",G_CALLBACK(on_scroll),nullptr);
+    g_signal_connect(G.drawingArea,"key-press-event",G_CALLBACK(on_keypress),nullptr);
+    gtk_container_add(GTK_CONTAINER(G.overlay), G.drawingArea);
+    gtk_box_pack_start(GTK_BOX(contentBox), G.overlay, TRUE, TRUE, 0);
+
+    // Right sidebar (note list, thumbnails, search, properties)
     GtkWidget* sidebar = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_widget_set_size_request(sidebar, 150, -1);
-    gtk_box_pack_start(GTK_BOX(contentBox), sidebar, FALSE, FALSE, 0);
+    gtk_widget_set_size_request(sidebar, 180, -1);
+    gtk_box_pack_end(GTK_BOX(contentBox), sidebar, FALSE, FALSE, 0);
 
-    GtkWidget* newBtn = gtk_button_new_with_label("+ 新筆記");
-    g_signal_connect(newBtn,"clicked",G_CALLBACK(on_newnote),nullptr);
-    gtk_box_pack_start(GTK_BOX(sidebar),newBtn,FALSE,FALSE,2);
+    // Separator between drawing area and sidebar
+    GtkWidget* sep = gtk_separator_new(GTK_ORIENTATION_VERTICAL);
+    gtk_box_pack_start(GTK_BOX(contentBox), sep, FALSE, FALSE, 0);
 
+    // Note list (top of sidebar)
     G.noteList = gtk_list_box_new();
     gtk_list_box_set_selection_mode(GTK_LIST_BOX(G.noteList), GTK_SELECTION_NONE);
     g_signal_connect(G.noteList,"row-activated",G_CALLBACK(on_note_activated),nullptr);
-
-    // Right-click context menu
     g_signal_connect(G.noteList, "button-press-event", G_CALLBACK(on_note_list_button_press), nullptr);
     gtk_widget_add_events(G.noteList, GDK_BUTTON_PRESS_MASK);
 
     GtkWidget* noteScroll = gtk_scrolled_window_new(nullptr,nullptr);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(noteScroll),GTK_POLICY_NEVER,GTK_POLICY_AUTOMATIC);
     gtk_container_add(GTK_CONTAINER(noteScroll),G.noteList);
-    gtk_box_pack_start(GTK_BOX(sidebar),noteScroll,TRUE,TRUE,0);
+    gtk_box_pack_start(GTK_BOX(sidebar),noteScroll,TRUE,TRUE,2);
+
+    GtkWidget* newBtn = gtk_button_new_with_label("+ 新筆記");
+    g_signal_connect(newBtn,"clicked",G_CALLBACK(on_newnote),nullptr);
+    gtk_box_pack_start(GTK_BOX(sidebar),newBtn,FALSE,FALSE,2);
 
     // ── Page thumbnails (bottom of sidebar) ──
     GtkWidget* thumbLabel = gtk_label_new("頁面縮圖");
@@ -3383,7 +3405,7 @@ MainWindow::MainWindow(GtkApplication* app, AppController& ctrl) : app_(app), co
 
     GtkWidget* thumbScroll = gtk_scrolled_window_new(nullptr, nullptr);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(thumbScroll), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
-    gtk_widget_set_size_request(thumbScroll, 150, 200);
+    gtk_widget_set_size_request(thumbScroll, 180, 180);
     gtk_container_add(GTK_CONTAINER(thumbScroll), G.pageThumbs);
     gtk_box_pack_start(GTK_BOX(sidebar), thumbScroll, FALSE, FALSE, 2);
 
@@ -3428,21 +3450,6 @@ MainWindow::MainWindow(GtkApplication* app, AppController& ctrl) : app_(app), co
     gtk_box_pack_start(GTK_BOX(G.propPanel), clrBox, FALSE, FALSE, 0);
 
     gtk_box_pack_start(GTK_BOX(sidebar), G.propPanel, FALSE, FALSE, 0);
-
-    // Drawing area wrapped in GtkOverlay
-    G.overlay = gtk_overlay_new();
-    G.drawingArea = gtk_drawing_area_new();
-    gtk_widget_set_events(G.drawingArea,
-        GDK_EXPOSURE_MASK|GDK_BUTTON_PRESS_MASK|GDK_BUTTON_RELEASE_MASK|
-        GDK_POINTER_MOTION_MASK|GDK_SCROLL_MASK|GDK_KEY_PRESS_MASK);
-    g_signal_connect(G.drawingArea,"draw",G_CALLBACK(on_draw),nullptr);
-    g_signal_connect(G.drawingArea,"button-press-event",G_CALLBACK(on_btnpress),nullptr);
-    g_signal_connect(G.drawingArea,"button-release-event",G_CALLBACK(on_btnrelease),nullptr);
-    g_signal_connect(G.drawingArea,"motion-notify-event",G_CALLBACK(on_motion),nullptr);
-    g_signal_connect(G.drawingArea,"scroll-event",G_CALLBACK(on_scroll),nullptr);
-    g_signal_connect(G.drawingArea,"key-press-event",G_CALLBACK(on_keypress),nullptr);
-    gtk_container_add(GTK_CONTAINER(G.overlay), G.drawingArea);
-    gtk_box_pack_start(GTK_BOX(contentBox), G.overlay, TRUE, TRUE, 0);
 
     // ── Bottom bar ──
     GtkWidget* bottomBox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
