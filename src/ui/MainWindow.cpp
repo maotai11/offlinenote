@@ -130,6 +130,13 @@ static struct {
     double pageScrollY = 0; // Vertical scroll offset when zoomed
     double pageScrollX = 0; // Horizontal scroll offset when zoomed
 
+    // Rubber band selection
+    int selBoxActive = 0;     // 1 = drawing selection box
+    double selBoxX = 0, selBoxY = 0, selBoxW = 0, selBoxH = 0;
+    std::vector<int> selTexts;    // multiple selected text indices
+    std::vector<int> selStrokes;  // multiple selected stroke indices
+    std::vector<int> selImages;   // multiple selected image indices
+
     // Auto-save
     guint autoSaveTimer = 0;
     bool shuttingDown = false;
@@ -589,7 +596,11 @@ static void renderCanvas() {
         int tw = 0, th = 0;
         pango_layout_get_pixel_size(layout, &tw, &th);
 
-        if ((int)i == G.selTxt) {
+        // Highlight if in multiple selection
+        int isInMultiSel = 0;
+        for (int si : G.selTexts) { if (si == (int)i) { isInMultiSel = 1; break; } }
+
+        if ((int)i == G.selTxt || isInMultiSel) {
             // Dashed border for selected text
             cairo_set_source_rgba(cr, 0.2, 0.5, 1, 0.7);
             cairo_set_line_width(cr, 2);
@@ -657,6 +668,25 @@ static void renderCanvas() {
         }
     }
 
+    // Draw rubber band selection box
+    if (G.selBoxActive) {
+        cairo_save(cr);
+        double bx = G.selBoxX * G.zoom + leftMargin;
+        double by = G.selBoxY * G.zoom + topMargin;
+        double bw = G.selBoxW * G.zoom;
+        double bh = G.selBoxH * G.zoom;
+        cairo_set_source_rgba(cr, 0.2, 0.5, 1, 0.15);
+        cairo_rectangle(cr, bx, by, bw, bh);
+        cairo_fill(cr);
+        cairo_set_source_rgba(cr, 0.2, 0.5, 1, 0.8);
+        cairo_set_line_width(cr, 1.5);
+        cairo_set_dash(cr, (double[]){5, 3}, 2, 0);
+        cairo_rectangle(cr, bx, by, bw, bh);
+        cairo_stroke(cr);
+        cairo_set_dash(cr, nullptr, 0, 0);
+        cairo_restore(cr);
+    }
+
     cairo_destroy(cr);
 
     // Queue redraw
@@ -684,6 +714,15 @@ static gboolean on_btnpress(GtkWidget*, GdkEventButton* ev, gpointer) {
     if (G.tool == 4) {
         G.selImg = -1; G.selTxt = -1; G.selStroke = -1;
         G.dragging = 0; G.resizing = 0;
+
+        // Shift+Click = Start rubber band selection box
+        if (ev->state & GDK_SHIFT_MASK) {
+            G.selBoxActive = 1;
+            G.selBoxX = px; G.selBoxY = py;
+            G.selBoxW = 0; G.selBoxH = 0;
+            G.selTexts.clear(); G.selStrokes.clear(); G.selImages.clear();
+            return TRUE;
+        }
 
         // 1. Check strokes first (highest priority for content)
         double strokeHitDist = 15.0 / G.zoom;
@@ -817,6 +856,47 @@ static gboolean on_btnpress(GtkWidget*, GdkEventButton* ev, gpointer) {
 }
 
 static gboolean on_btnrelease(GtkWidget*, GdkEventButton*, gpointer) {
+    // Finalize rubber band selection
+    if (G.selBoxActive) {
+        PageData* pg = curPage();
+        if (pg) {
+            // Normalize box coordinates
+            double bx = G.selBoxX, by = G.selBoxY;
+            double bw = G.selBoxW, bh = G.selBoxH;
+            if (bw < 0) { bx += bw; bw = -bw; }
+            if (bh < 0) { by += bh; bh = -bh; }
+
+            // Select all texts in box
+            for (int i = 0; i < (int)pg->texts.size(); i++) {
+                TxtEl* t = &pg->texts[i];
+                if (t->x >= bx && t->x <= bx+bw && t->y >= by && t->y <= by+bh) {
+                    G.selTexts.push_back(i);
+                }
+            }
+            // Select all strokes in box (any point inside)
+            for (int i = 0; i < (int)pg->strokes.size(); i++) {
+                StrokeData* s = &pg->strokes[i];
+                for (size_t j = 0; j < s->x.size(); j++) {
+                    if (s->x[j] >= bx && s->x[j] <= bx+bw && s->y[j] >= by && s->y[j] <= by+bh) {
+                        G.selStrokes.push_back(i);
+                        break;
+                    }
+                }
+            }
+            // Select all images in box
+            for (int i = 0; i < (int)pg->images.size(); i++) {
+                ImgEl* img = &pg->images[i];
+                if (img->x >= bx && img->x <= bx+bw && img->y >= by && img->y <= by+bh) {
+                    G.selImages.push_back(i);
+                }
+            }
+        }
+        G.selBoxActive = 0;
+        G.selBoxW = 0; G.selBoxH = 0;
+        renderCanvas(); updateStatus();
+        return TRUE;
+    }
+
     G.drawing = 0;
     G.dragging = 0;
     G.resizing = 0;
@@ -832,6 +912,14 @@ static gboolean on_motion(GtkWidget*, GdkEventMotion* ev, gpointer) {
     // Account for scroll offsets
     double px = (ev->x - G.margins[0] - G.pageScrollX) / G.zoom;
     double py = (ev->y - G.margins[1] - G.pageScrollY) / G.zoom;
+
+    if (G.selBoxActive) {
+        // Update selection box
+        G.selBoxW = px - G.selBoxX;
+        G.selBoxH = py - G.selBoxY;
+        renderCanvas();  // Will draw selection box overlay
+        return TRUE;
+    }
 
     if (G.dragging) {
         if (G.selStroke >= 0 && G.selStroke < (int)pg->strokes.size()) {
@@ -1221,21 +1309,50 @@ static void on_redo(GtkButton*, gpointer) {
 }
 static void on_del(GtkButton*, gpointer) {
     PageData* pg=curPage(); if(!pg) return;
-    if(G.selImg>=0 && G.selImg<(int)pg->images.size()){
-        pushUndo();
+
+    pushUndo();
+
+    // Delete multiple selected texts
+    if (!G.selTexts.empty()) {
+        for (int i = (int)G.selTexts.size()-1; i >= 0; i--) {
+            pg->texts.erase(pg->texts.begin() + G.selTexts[i]);
+        }
+        G.selTexts.clear();
+        G.selTxt = -1;
+    }
+
+    // Delete multiple selected strokes
+    if (!G.selStrokes.empty()) {
+        for (int i = (int)G.selStrokes.size()-1; i >= 0; i--) {
+            pg->strokes.erase(pg->strokes.begin() + G.selStrokes[i]);
+        }
+        G.selStrokes.clear();
+        G.selStroke = -1;
+    }
+
+    // Delete multiple selected images
+    if (!G.selImages.empty()) {
+        for (int i = (int)G.selImages.size()-1; i >= 0; i--) {
+            pg->images.erase(pg->images.begin() + G.selImages[i]);
+        }
+        G.selImages.clear();
+        G.selImg = -1;
+    }
+
+    // Fallback: single item delete
+    if (G.selImg>=0 && G.selImg<(int)pg->images.size()){
         pg->images.erase(pg->images.begin()+G.selImg);G.selImg=-1;
-        NoteData* n=curNote();if(n)n->dirty=1;renderCanvas();updateStatus();rebuildThumbs();
     }
     else if(G.selTxt>=0 && G.selTxt<(int)pg->texts.size()){
-        pushUndo();
         pg->texts.erase(pg->texts.begin()+G.selTxt);G.selTxt=-1;
-        NoteData* n=curNote();if(n)n->dirty=1;renderCanvas();updateStatus();rebuildThumbs();
     }
     else if(!pg->strokes.empty()){
-        pushUndo();
         pg->strokes.pop_back();
-        NoteData* n=curNote();if(n)n->dirty=1;renderCanvas();updateStatus();rebuildThumbs();
     }
+
+    NoteData* n=curNote();if(n)n->dirty=1;
+    if (G.canvasSurf) { cairo_surface_destroy(G.canvasSurf); G.canvasSurf = nullptr; }
+    renderCanvas(); updateStatus(); rebuildThumbs();
 }
 
 // ============================================================
