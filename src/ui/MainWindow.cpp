@@ -169,6 +169,7 @@ static const char* TOOL_NAMES[] = {
 // ============================================================
 static void renderCanvas();
 static void rebuildThumbs();
+static void updateWindowTitle();
 static std::string serializeNote(const NoteData* nd);
 static void deserializeNoteToCurrent(const std::string& data);
 static void on_undo(GtkButton*, gpointer);
@@ -259,6 +260,7 @@ static void updateStatus() {
     snprintf(buf, sizeof(buf), "%s %s %d/%d 筆:%d 文:%d 圖:%d%s | %s",
              nn, ori, G.selPage+1, npg, nst, ntx, nim, selInfo, TOOL_NAMES[G.tool]);
     gtk_label_set_text(GTK_LABEL(G.lblStatus), buf);
+    updateWindowTitle();
     if (G.lblZoom) {
         char z[64];
         snprintf(z, sizeof(z), "%d%%", (int)(G.zoom*100));
@@ -271,6 +273,16 @@ static void updateStatus() {
         gtk_label_set_text(GTK_LABEL(G.lblPage), p);
         gtk_widget_set_tooltip_text(G.lblPage, "點擊側邊欄筆記旁的 ✎ 可重命名\n點擊 ✖ 可刪除筆記");
     }
+}
+
+static void updateWindowTitle() {
+    NoteData* n = curNote();
+    char title[512];
+    const char* nn = (n && !n->name.empty()) ? n->name.c_str() : "未命名";
+    int pageIdx = G.selPage + 1;
+    int totalPages = n ? (int)n->pages.size() : 0;
+    snprintf(title, sizeof(title), "OfflineNote - %s (第 %d/%d 頁)", nn, pageIdx, totalPages);
+    gtk_window_set_title(GTK_WINDOW(G.window), title);
 }
 
 // Auto-save callback (called every 30 seconds)
@@ -1532,7 +1544,7 @@ static void rebuildNoteList() {
         gtk_widget_show_all(row);
         if ((int)i == G.selNote) {
             GtkStyleContext* rsc = gtk_widget_get_style_context(row);
-            gtk_style_context_add_class(rsc, GTK_STYLE_CLASS_SUGGESTED_ACTION);
+            gtk_style_context_add_class(rsc, "note-selected");
         }
         g_object_set_data(G_OBJECT(row), "idx", GINT_TO_POINTER(i));
         gtk_list_box_insert(GTK_LIST_BOX(G.noteList), row, -1);
@@ -3219,9 +3231,35 @@ MainWindow::MainWindow(GtkApplication* app, AppController& ctrl) : app_(app), co
     G.ctrl = &ctrl;
     window_ = gtk_application_window_new(app);
     G.window = window_;
-    gtk_window_set_title(GTK_WINDOW(window_), "OfflineNote 離線筆記本");
     gtk_window_set_default_size(GTK_WINDOW(window_), 1280, 800);
     gtk_window_set_position(GTK_WINDOW(window_), GTK_WIN_POS_CENTER);
+
+    // ── CSS for clear note selection highlight ──
+    GtkCssProvider* provider = gtk_css_provider_new();
+    gtk_css_provider_load_from_data(provider,
+        ".note-selected {\n"
+        "  background-color: #1a73e8;\n"
+        "  color: #ffffff;\n"
+        "  font-weight: bold;\n"
+        "}\n"
+        ".note-selected label {\n"
+        "  color: #ffffff;\n"
+        "  font-weight: bold;\n"
+        "}\n"
+        ".note-selected button {\n"
+        "  background-color: rgba(255,255,255,0.3);\n"
+        "  color: #ffffff;\n"
+        "}\n"
+        "list row:hover {\n"
+        "  background-color: #e8f0fe;\n"
+        "}\n",
+        -1, nullptr);
+    gtk_style_context_add_provider_for_screen(gdk_screen_get_default(),
+        GTK_STYLE_PROVIDER(provider), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    g_object_unref(provider);
+
+    // Set title with note name
+    updateWindowTitle();
 
     GtkWidget* mainBox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_container_add(GTK_CONTAINER(window_), mainBox);
