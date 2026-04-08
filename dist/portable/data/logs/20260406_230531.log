@@ -1,9 +1,0 @@
-2026-04-06 23:05:31 [INFO] Running startup checks...
-2026-04-06 23:05:31 [WARNING] Bundled fallback font not found at: C:\Users\LIN\OfflineNote\dist\portable\resources\fonts\NotoSans
-2026-04-06 23:05:31 [INFO] All startup checks passed.
-2026-04-06 23:05:31 [INFO] AppController created
-2026-04-06 23:05:32 [INFO] Application startup complete
-2026-04-06 23:05:37 [INFO] 已儲存: 123
-2026-04-06 23:05:38 [INFO] Application shutting down
-2026-04-06 23:05:38 [INFO] AppController destroying
-2026-04-06 23:05:38 [INFO] Shutdown complete

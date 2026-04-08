@@ -297,17 +297,51 @@ static gboolean auto_save_callback(gpointer) {
     }
     if (saved > 0) {
         logInfo("Auto-saved %d notes", saved);
-        // Also save crash recovery snapshot (current note)
+        // Save crash recovery snapshot in the SAME .onote format
         NoteData* cur = curNote();
         if (cur && !G.crashRecoveryFile.empty()) {
-            std::string snap = serializeNote(cur);
-            if (!snap.empty()) {
-                FILE* f = wfopen_utf8(G.crashRecoveryFile, L"wb");
-                if (f) {
-                    fprintf(f, "%s", snap.c_str());
-                    fclose(f);
+            // Temporarily redirect save to crash recovery file
+            std::string origName = cur->name;
+            std::string origPath = note_filename(cur);
+            cur->name = "crash_recovery";
+            std::string crashFile = get_save_dir() + "/crash_recovery.onote";
+            FILE* f = wfopen_utf8(crashFile, L"wb");
+            if (f) {
+                fprintf(f, "# OfflineNote v1\n");
+                fprintf(f, "name=%s\n", cur->name.c_str());
+                fprintf(f, "pages=%zu\n", cur->pages.size());
+                for (size_t pi = 0; pi < cur->pages.size(); pi++) {
+                    PageData* pg = &cur->pages[pi];
+                    fprintf(f, "[page %zu]\n", pi);
+                    fprintf(f, "pw=%g\nph=%g\n", pg->pw, pg->ph);
+                    for (size_t si = 0; si < pg->strokes.size(); si++) {
+                        StrokeData* s = &pg->strokes[si];
+                        fprintf(f, "s %zu w=%g r=%g g=%g b=%g a=%g t=%d\n", si, s->w, s->r, s->g, s->b, s->a, s->tool);
+                        for (size_t pt = 0; pt < s->x.size(); pt++) {
+                            fprintf(f, "p %g %g\n", s->x[pt], s->y[pt]);
+                        }
+                    }
+                    for (size_t ti = 0; ti < pg->texts.size(); ti++) {
+                        TxtEl* t = &pg->texts[ti];
+                        std::string esc = t->text;
+                        for (auto& c : esc) { if (c == '\n') c = ' '; if (c == '|') c = '-'; }
+                        fprintf(f, "t %zu x=%g y=%g fs=%g r=%g g=%g b=%g txt=%s\n",
+                                ti, t->x, t->y, t->fontSize, t->r, t->g, t->b, esc.c_str());
+                    }
+                    for (size_t ii = 0; ii < pg->images.size(); ii++) {
+                        ImgEl* img = &pg->images[ii];
+                        if (!img->srcFile.empty()) {
+                            fprintf(f, "img %zu x=%g y=%g w=%g h=%g src=%s\n",
+                                    ii, img->x, img->y, img->w, img->h, img->srcFile.c_str());
+                        }
+                    }
+                    if (!pg->bgFile.empty()) {
+                        fprintf(f, "bg src=%s w=%g h=%g\n", pg->bgFile.c_str(), pg->bgW, pg->bgH);
+                    }
                 }
+                fclose(f);
             }
+            cur->name = origName;
         }
     }
     return TRUE; // keep running
@@ -3513,34 +3547,15 @@ MainWindow::MainWindow(GtkApplication* app, AppController& ctrl) : app_(app), co
     // ── Auto-save timer (every 30 seconds) ──
     G.autoSaveTimer = g_timeout_add_seconds(30, auto_save_callback, nullptr);
 
-    // ── Crash recovery: save snapshot path ──
+    // ── Crash recovery ──
     G.crashRecoveryFile = get_save_dir() + "/crash_recovery.onote";
 
-    // Check if there's a crash recovery file from previous session
+    // On normal startup, delete any existing crash recovery file (means previous session ended normally)
     if (fs::exists(G.crashRecoveryFile)) {
-        GtkWidget* dlg = gtk_message_dialog_new(GTK_WINDOW(G.window), GTK_DIALOG_MODAL,
-            GTK_MESSAGE_QUESTION, GTK_BUTTONS_YES_NO,
-            "偵測到上次異常關閉。\n是否恢復未儲存的筆記？");
-        int resp = gtk_dialog_run(GTK_DIALOG(dlg));
-        gtk_widget_destroy(dlg);
-
-        if (resp == GTK_RESPONSE_YES) {
-            G.notes.push_back(NoteData());
-            NoteData* nd = &G.notes.back();
-            if (load_note_from_file(G.crashRecoveryFile, nd)) {
-                G.selNote = 0; G.selPage = 0;
-                if (G.canvasSurf) { cairo_surface_destroy(G.canvasSurf); G.canvasSurf = nullptr; }
-                rebuildNoteList(); renderCanvas(); updateStatus(); rebuildThumbs();
-                logInfo("Crash recovery: 已恢復筆記");
-            } else {
-                G.notes.pop_back();
-                logInfo("Crash recovery: 恢復失敗");
-            }
-        } else {
-            // User declined - delete the recovery file
-            fs::remove(G.crashRecoveryFile);
-        }
+        fs::remove(G.crashRecoveryFile);
     }
+
+    // ── Load existing notes ──
 
     // ── Keyboard shortcut hint in status bar ──
     gtk_widget_set_tooltip_text(G.lblStatus,

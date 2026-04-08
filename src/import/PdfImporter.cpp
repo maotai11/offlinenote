@@ -23,7 +23,10 @@ static PdfPageResult renderPdfPageToSurface(const std::string& pdfPath, int page
     PdfPageResult result = { nullptr, 0, 0, "" };
 
     GError* err = nullptr;
-    PopplerDocument* doc = poppler_document_new_from_file(pdfPath.c_str(), nullptr, &err);
+    // Use GFile for proper Windows/Unicode path handling
+    GFile* gfile = g_file_new_for_path(pdfPath.c_str());
+    PopplerDocument* doc = poppler_document_new_from_gfile(gfile, nullptr, nullptr, &err);
+    g_object_unref(gfile);
     if (!doc) {
         if (err) g_error_free(err);
         return result;
@@ -93,7 +96,10 @@ std::vector<PdfImportedPage> PdfImporter::importPdf(const std::string& pdfPath, 
     fs::create_directories(outDir);
 
     GError* err = nullptr;
-    PopplerDocument* doc = poppler_document_new_from_file(pdfPath.c_str(), nullptr, &err);
+    // Use GFile for proper Windows/Unicode path handling
+    GFile* gfile = g_file_new_for_path(pdfPath.c_str());
+    PopplerDocument* doc = poppler_document_new_from_gfile(gfile, nullptr, nullptr, &err);
+    g_object_unref(gfile);
     if (!doc) {
         if (err) g_error_free(err);
         return pages;

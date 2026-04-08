@@ -6,7 +6,22 @@
 #include <filesystem>
 #include <system_error>
 
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
 namespace fs = std::filesystem;
+
+static fs::path get_exe_dir() {
+#if defined(_WIN32)
+    wchar_t path[MAX_PATH];
+    DWORD len = GetModuleFileNameW(nullptr, path, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) return fs::current_path();
+    return fs::path(path).parent_path();
+#else
+    return fs::current_path();
+#endif
+}
 
 PathValidationResult PathValidator::validatePath(
     const fs::path& inputPath,
@@ -35,9 +50,9 @@ PathValidationResult PathValidator::validatePath(
         Logger::warning("PathValidator: Suspicious traversal components in path");
     }
 
-    // 解析 canonical 路徑
+    // 解析 canonical 路徑 (use weakly_canonical for paths that may not exist yet)
     std::error_code ec;
-    fs::path canonical = fs::canonical(inputPath, ec);
+    fs::path canonical = fs::weakly_canonical(inputPath, ec);
 
     if (ec) {
         result.reason = "Cannot resolve path: " + ec.message();
@@ -51,7 +66,7 @@ PathValidationResult PathValidator::validatePath(
             return result;
         }
 
-        fs::path canonicalRoot = fs::canonical(allowedRoot, ec);
+        fs::path canonicalRoot = fs::weakly_canonical(allowedRoot, ec);
         if (ec) {
             result.reason = "Cannot resolve allowed root: " + ec.message();
             return result;
@@ -86,8 +101,8 @@ PathValidationResult PathValidator::validatePdfPath(
     else {
         // 來自 .onote 嵌入路徑：必須更嚴格，限制在資源目錄內
         Logger::debug("PathValidator: Validating embedded resource path from .onote file");
-        // 使用 RestrictToDirectory 策略，限制在可執行檔目錄下
-        fs::path exeDir = fs::path("C:\\Users\\LIN\\OfflineNote\\dist\\portable");  // TODO: Use get_exe_dir()
+        // Use executable directory as the allowed root
+        fs::path exeDir = get_exe_dir();
         return validatePath(path, PathValidationPolicy::RestrictToDirectory, exeDir);
     }
 }

@@ -50,8 +50,8 @@ DecompressResult SafeDecompressor::decompress(const std::filesystem::path& path)
     strm.avail_in = compressedSize;
     strm.next_in = reinterpret_cast<Bytef*>(compressed.data());
 
-    // 初始化 inflate
-    if (inflateInit(&strm) != Z_OK) {
+    // Initialize inflate with gzip support (windowBits 32 = auto-detect gzip or zlib)
+    if (inflateInit2(&strm, 32 + 15) != Z_OK) {
         result.errorMessage = "Failed to initialize decompressor";
         return result;
     }
