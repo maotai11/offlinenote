@@ -38,6 +38,12 @@ DecompressResult SafeDecompressor::decompress(const std::filesystem::path& path)
     std::streamsize compressedSize = ifs.tellg();
     ifs.seekg(0, std::ios::beg);
 
+    // Reject empty files
+    if (compressedSize <= 0) {
+        result.errorMessage = "File is empty";
+        return result;
+    }
+
     std::vector<char> compressed(compressedSize);
     if (!ifs.read(compressed.data(), compressedSize)) {
         result.errorMessage = "Failed to read compressed data";
@@ -62,14 +68,22 @@ DecompressResult SafeDecompressor::decompress(const std::filesystem::path& path)
 
     char buf[32768];
     int ret;
+    int iterations = 0;
+    constexpr int MAX_ITERATIONS = 100000; // Safety limit
     do {
+        iterations++;
+        if (iterations > MAX_ITERATIONS) {
+            inflateEnd(&strm);
+            result.errorMessage = "Decompression iteration limit exceeded";
+            return result;
+        }
         strm.avail_out = sizeof(buf);
         strm.next_out = reinterpret_cast<Bytef*>(buf);
 
         ret = inflate(&strm, Z_NO_FLUSH);
-        if (ret == Z_STREAM_ERROR) {
+        if (ret == Z_STREAM_ERROR || ret == Z_DATA_ERROR || ret == Z_MEM_ERROR || ret == Z_BUF_ERROR) {
             inflateEnd(&strm);
-            result.errorMessage = "Decompression error";
+            result.errorMessage = "Decompression error (code " + std::to_string(ret) + ")";
             return result;
         }
 
