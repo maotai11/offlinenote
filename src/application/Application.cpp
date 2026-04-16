@@ -7,15 +7,15 @@
 #include "StartupCheck.h"
 #include "../ui/MainWindow.h"
 #include "../util/Logger.h"
-#include "../platform/FontManager.h"
 
+#include <filesystem>
 #include <stdexcept>
 
 Application::Application()
 {
     gtkApp_ = gtk_application_new(
         "com.example.offlinenote",
-        G_APPLICATION_HANDLES_OPEN
+        G_APPLICATION_FLAGS_NONE
     );
 
     if (!gtkApp_) {
@@ -23,7 +23,6 @@ Application::Application()
     }
 
     g_signal_connect(gtkApp_, "activate", G_CALLBACK(onActivate), this);
-    g_signal_connect(gtkApp_, "open",     G_CALLBACK(onOpen),     this);
     g_signal_connect(gtkApp_, "shutdown", G_CALLBACK(onShutdown), this);
 }
 
@@ -44,11 +43,6 @@ void Application::onActivate(GtkApplication*, gpointer userData)
     static_cast<Application*>(userData)->handleActivate();
 }
 
-void Application::onOpen(GtkApplication*, GFile** files, gint nFiles, const gchar*, gpointer userData)
-{
-    static_cast<Application*>(userData)->handleOpen(files, nFiles);
-}
-
 void Application::onShutdown(GtkApplication*, gpointer userData)
 {
     static_cast<Application*>(userData)->handleShutdown();
@@ -58,43 +52,22 @@ void Application::handleActivate()
 {
     Logger::info("Application activating");
 
-    // 1. 初始化路徑管理器
     PathManager::instance().initialize();
     Logger::info("PathManager initialized, dataDir={}",
                  PathManager::instance().getUserDataDir().string());
 
-    // 2. 啟動完整日誌
     Logger::fullInit(PathManager::instance().getLogDir());
 
-    // 3. 啟動前資源完整性檢查
     StartupCheck check;
     check.run();
 
-    // 4. 初始化字型
-    // FontManager::instance().initialize(PathManager::instance().getResourceDir());
-
-    // 5. 載入 CSS
     setupCSS();
 
-    // 6. 建立業務控制器
     controller_ = std::make_unique<AppController>();
-
-    // 7. 建立並顯示主視窗
     mainWindow_ = std::make_unique<MainWindow>(gtkApp_, *controller_);
     mainWindow_->show();
 
     Logger::info("Application startup complete");
-}
-
-void Application::handleOpen(GFile** files, gint nFiles)
-{
-    Logger::info("Opening {} file(s)", std::to_string(nFiles));
-    // TODO: 處理文件開啟
-    for (gint i = 0; i < nFiles; ++i) {
-        char* path = g_file_get_path(files[i]);
-        Logger::info("File to open: {}", path ? path : "(null)");
-        g_free(path);
-    }
 }
 
 void Application::handleShutdown()
@@ -141,7 +114,7 @@ void Application::setupCSS()
             GTK_DIALOG_MODAL,
             GTK_MESSAGE_ERROR,
             GTK_BUTTONS_CLOSE,
-            "OfflineNote — Fatal Error"
+            "OfflineNote - Fatal Error"
         );
         gtk_message_dialog_format_secondary_text(
             GTK_MESSAGE_DIALOG(dialog), "%s", message.c_str()

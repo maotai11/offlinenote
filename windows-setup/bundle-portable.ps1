@@ -3,7 +3,13 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 param(
     [string]$BuildDir = "C:\Users\LIN\OfflineNote\build",
-    [string]$OutputDir = "C:\Users\LIN\OfflineNote\dist\portable"
+    [string]$OutputDir = "C:\Users\LIN\OfflineNote\dist\portable",
+    [switch]$CleanOutput,
+    [switch]$SignArtifacts,
+    [string]$CertPath = $env:OFFLINENOTE_SIGN_CERT_FILE,
+    [string]$CertPassword = $env:OFFLINENOTE_SIGN_CERT_PASSWORD,
+    [string]$TimestampUrl = $(if ($env:OFFLINENOTE_TIMESTAMP_URL) { $env:OFFLINENOTE_TIMESTAMP_URL } else { "http://timestamp.digicert.com" }),
+    [string]$SignToolPath = $env:OFFLINENOTE_SIGNTOOL_PATH
 )
 
 Set-StrictMode -Version Latest
@@ -14,6 +20,21 @@ $BIN = "$MSYS64\bin"
 
 Write-Host "=== OfflineNote Portable Bundle ===" -ForegroundColor Cyan
 
+if (!(Test-Path "$BuildDir\offlinenote.exe")) {
+    throw "Build output not found: $BuildDir\offlinenote.exe"
+}
+
+if (Test-Path $OutputDir) {
+    $existingEntries = Get-ChildItem -Path $OutputDir -Force
+    if ($existingEntries.Count -gt 0 -and -not $CleanOutput) {
+        throw "Output directory is not empty: $OutputDir. Re-run with -CleanOutput to avoid stale release files."
+    }
+
+    if ($existingEntries.Count -gt 0 -and $CleanOutput) {
+        Remove-Item -Path $OutputDir -Recurse -Force
+    }
+}
+
 # ── 建立目錄結構
 New-Item -ItemType Directory -Force -Path "$OutputDir" | Out-Null
 New-Item -ItemType Directory -Force -Path "$OutputDir\resources\fonts" | Out-Null
@@ -21,6 +42,7 @@ New-Item -ItemType Directory -Force -Path "$OutputDir\resources\icons" | Out-Nul
 New-Item -ItemType Directory -Force -Path "$OutputDir\resources\themes\offlinenote-fallback" | Out-Null
 New-Item -ItemType Directory -Force -Path "$OutputDir\resources\translations" | Out-Null
 New-Item -ItemType Directory -Force -Path "$OutputDir\data\logs" | Out-Null
+New-Item -ItemType Directory -Force -Path "$OutputDir\data\cache" | Out-Null
 New-Item -ItemType Directory -Force -Path "$OutputDir\share\glib-2.0\schemas" | Out-Null
 New-Item -ItemType Directory -Force -Path "$OutputDir\share\icons\hicolor" | Out-Null
 New-Item -ItemType Directory -Force -Path "$OutputDir\lib\gdk-pixbuf-2.0\2.10.0" | Out-Null
@@ -67,8 +89,8 @@ $RequiredDlls = @(
     "libharfbuzz-0.dll",
     "libpixman-1-0.dll",
     "libpng16-16.dll",
-    "libxml2-2.dll",
-    "libz.dll",
+    "libxml2-16.dll",
+    "zlib1.dll",
     "libiconv-2.dll",
     "libintl-8.dll",
     "libffi-8.dll",
@@ -85,7 +107,6 @@ $RequiredDlls = @(
     "libgcc_s_seh-1.dll",
     "libstdc++-6.dll",
     "libwinpthread-1.dll",
-    "zlib1.dll",
     "liblzma-5.dll",
     "libpsl-5.dll",
     "libidn2-0.dll",
@@ -161,21 +182,46 @@ if (Test-Path "$MSYS64\share\glib-2.0\schemas") {
 }
 
 # ── 啟動腳本
-$startupScript = @'
+$portableLauncher = @'
 @echo off
 setlocal
 
 set "APP_DIR=%~dp0"
+pushd "%APP_DIR%" >nul
 set "PATH=%APP_DIR%;%PATH%"
 
 set "GDK_PIXBUF_MODULEDIR=%APP_DIR%lib\gdk-pixbuf-2.0\2.10.0"
 set "GDK_PIXBUF_MODULEFILE=%APP_DIR%lib\gdk-pixbuf-2.0\2.10.0\loaders.cache"
+set "GSETTINGS_SCHEMA_DIR=%APP_DIR%share\glib-2.0\schemas"
 set "XDG_DATA_DIRS=%APP_DIR%share"
 set "FONTCONFIG_FILE=%APP_DIR%resources\fonts\fonts.conf"
 
-start "" "%APP_DIR%offlinenote.exe"
 '@
-Set-Content -Path "$OutputDir\run.bat" -Value $startupScript -Encoding ASCII
+
+$portableDebugLauncher = @'
+@echo off
+setlocal
+
+set "APP_DIR=%~dp0"
+pushd "%APP_DIR%" >nul
+set "PATH=%APP_DIR%;%PATH%"
+
+set "GDK_PIXBUF_MODULEDIR=%APP_DIR%lib\gdk-pixbuf-2.0\2.10.0"
+set "GDK_PIXBUF_MODULEFILE=%APP_DIR%lib\gdk-pixbuf-2.0\2.10.0\loaders.cache"
+set "GSETTINGS_SCHEMA_DIR=%APP_DIR%share\glib-2.0\schemas"
+set "XDG_DATA_DIRS=%APP_DIR%share"
+set "FONTCONFIG_FILE=%APP_DIR%resources\fonts\fonts.conf"
+
+"%APP_DIR%offlinenote.exe" %*
+set "EXIT_CODE=%ERRORLEVEL%"
+popd >nul
+exit /b %EXIT_CODE%
+'@
+Set-Content -Path "$OutputDir\OfflineNote-Portable.bat" -Value ($portableLauncher + "start `"`" `"%APP_DIR%offlinenote.exe`" %*`r`npopd >nul`r`n") -Encoding ASCII
+Set-Content -Path "$OutputDir\OfflineNote-Portable-Debug.bat" -Value $portableDebugLauncher -Encoding ASCII
+Set-Content -Path "$OutputDir\run.bat" -Value ($portableLauncher + "start `"`" `"%APP_DIR%offlinenote.exe`" %*`r`npopd >nul`r`n") -Encoding ASCII
+Write-Host "[OK] OfflineNote-Portable.bat"
+Write-Host "[OK] OfflineNote-Portable-Debug.bat"
 Write-Host "[OK] run.bat"
 
 # ── fonts.conf
@@ -208,4 +254,22 @@ $RequiredDlls | ForEach-Object {
 
 $TotalSize = (Get-ChildItem $OutputDir -Recurse | Measure-Object -Property Length -Sum).Sum
 Write-Host "`nTotal bundle size: $([math]::Round($TotalSize / 1MB, 1)) MB"
+
+$bundleExe = Join-Path $OutputDir "offlinenote.exe"
+$shouldSign = $SignArtifacts -or [bool]$CertPath
+if ($shouldSign) {
+    Write-Host "`nSigning bundled executable..." -ForegroundColor Cyan
+    & "$PSScriptRoot\sign-artifacts.ps1" `
+        -FilePath $bundleExe `
+        -CertPath $CertPath `
+        -CertPassword $CertPassword `
+        -TimestampUrl $TimestampUrl `
+        -SignToolPath $SignToolPath
+
+    & "$PSScriptRoot\verify-signature.ps1" -FilePath $bundleExe
+    Write-Host "[OK] bundled executable signed and verified"
+} else {
+    Write-Host "[SKIP] Code signing not configured for portable bundle"
+}
+
 Write-Host "`n=== Bundle complete: $OutputDir ===" -ForegroundColor Green

@@ -25,22 +25,32 @@ static_assert(XML_PARSE_DTDLOAD == 4, "DTDLOAD value mismatch");
 static_assert(XML_PARSE_NONET == 2048, "NONET value mismatch");
 static_assert((SAFE_PARSE_OPTIONS & DANGEROUS_OPTIONS) == 0, "Safe/dangerous overlap");
 
+#if LIBXML_VERSION >= 21300
+static xmlParserErrors denyExternalResources(void*,
+                                             const char*,
+                                             const char*,
+                                             xmlResourceType,
+                                             xmlParserInputFlags,
+                                             xmlParserInput** out) {
+    if (out) *out = nullptr;
+    return XML_IO_LOAD_ERROR;
+}
+#endif
+
 void SecureXmlParser::applyContextSecurityOptions(xmlParserCtxtPtr ctxt) {
 #if LIBXML_VERSION >= 21300
     xmlCtxtSetOptions(ctxt, SAFE_PARSE_OPTIONS);
+    xmlCtxtSetResourceLoader(ctxt, denyExternalResources, nullptr);
 #else
     xmlCtxtUseOptions(ctxt, SAFE_PARSE_OPTIONS);
     ctxt->options &= ~DANGEROUS_OPTIONS;
-#endif
-
-    // Set per-context entity loader (available in libxml2 2.7.0+)
-    // This replaces the deprecated global xmlSetExternalEntityLoader
     ctxt->loadsubset = 0;  // Disable external subset (DTD) loading
     ctxt->replaceEntities = 0;  // Do not replace entities
 #if LIBXML_VERSION < 21500
     // For libxml2 < 2.15, also set the per-context loader as defense-in-depth
     // For 2.15+, the above flags are sufficient as xmlSetExternalEntityLoader is a no-op
     ctxt->extSubsetHandler = nullptr;  // Explicitly disable external subset handler
+#endif
 #endif
 }
 
@@ -62,8 +72,12 @@ SecureXmlParser::ParseResult SecureXmlParser::parseFromBuffer(const char* buffer
     applyContextSecurityOptions(ctxtHolder.get());
 
     ErrorAccumulator errorAcc;
+#if LIBXML_VERSION >= 21300
+    xmlCtxtSetErrorHandler(ctxtHolder.get(), ErrorAccumulator::handler, &errorAcc);
+#else
     xmlSetStructuredErrorFunc(ctxtHolder.get(), ErrorAccumulator::handler);
     ctxtHolder.get()->userData = &errorAcc;
+#endif
 
     xmlDocPtr rawDoc = xmlCtxtReadMemory(ctxtHolder.get(), buffer, static_cast<int>(bufferSize),
                                           "offlinenote-doc", "UTF-8", SAFE_PARSE_OPTIONS);

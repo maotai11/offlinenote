@@ -1,18 +1,18 @@
 // src/main.cpp
-// OfflineNote — 程式進入點
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "application/Application.h"
+#include "platform/RuntimeBootstrap.h"
 #include "util/Logger.h"
 
+#include <cstdio>
 #include <cstdlib>
 #include <exception>
-#include <cstdio>
 
 int main(int argc, char* argv[])
 {
-    // 盡早初始化日誌
     Logger::earlyInit();
+    configureBundledRuntimeEnvironment();
 
     try {
         Application app;

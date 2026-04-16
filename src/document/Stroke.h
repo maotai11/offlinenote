@@ -58,8 +58,20 @@ public:
     const ToolProperties& properties() const { return properties_; }
     const BoundingBox& boundingBox() const { return bbox_; }
 
+    void setProperties(const ToolProperties& props) { properties_ = props; }
+
     void addPoint(const StrokePoint& pt) {
+        if (!SafeFloat::isValidPageCoordinate(pt.x) || !SafeFloat::isValidPageCoordinate(pt.y)) {
+            return;
+        }
+
+        const bool firstPoint = points_.empty();
         points_.push_back(pt);
+        if (firstPoint) {
+            bbox_.minX = bbox_.maxX = pt.x;
+            bbox_.minY = bbox_.maxY = pt.y;
+            return;
+        }
         bbox_.update(pt.x, pt.y);
     }
 

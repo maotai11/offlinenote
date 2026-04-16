@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "AppController.h"
+#include "../platform/FileLock.h"
+#include "../serialization/NoteDeserializer.h"
+#include "../serialization/NoteSerializer.h"
 #include "../util/Logger.h"
 #include "../util/PathValidator.h"
-#include "../serialization/NoteDeserializer.h"
-#include <fstream>
 #include <filesystem>
 
 namespace fs = std::filesystem;
@@ -81,26 +82,23 @@ bool AppController::saveDocument(const std::filesystem::path& path) {
         }
     }
 
-    fs::path tmpPath = path;
-    tmpPath += ".tmp";
-
-    std::ofstream ofs(tmpPath, std::ios::binary);
-    if (!ofs) {
-        Logger::error("Failed to create temp file");
+    FileLock saveLock;
+    const FileLockResult lockResult = saveLock.tryLock(path);
+    if (lockResult != FileLockResult::Acquired) {
+        Logger::error("Failed to acquire file lock");
+        showError("Save Failed", "File is locked by another process");
         return false;
     }
-    ofs << "# OfflineNote v4.0\n";
-    ofs.close();
 
-    std::error_code ec;
-    fs::rename(tmpPath, path, ec);
-    if (ec) {
-        Logger::error("Atomic rename failed");
-        fs::remove(tmpPath);
+    NoteSerializer serializer;
+    if (!serializer.serialize(*currentDocument_, path)) {
+        Logger::error("Serialization failed");
         return false;
     }
 
     currentFilePath_ = path;
+    currentDocument_->setFilePath(path);
+    currentDocument_->clearDirty();
     dirty_ = false;
     Logger::info("Document saved");
     return true;
@@ -129,14 +127,6 @@ void AppController::onSaveDocument() {
             showError("Save Failed", "Cannot save file");
         }
     }
-}
-
-void AppController::onExportPdf(const std::filesystem::path& path) {
-    Logger::info("Export to PDF");
-}
-
-void AppController::onExportPng(const std::filesystem::path& path) {
-    Logger::info("Export to PNG");
 }
 
 void AppController::showError(const std::string& title, const std::string& message) {

@@ -10,6 +10,10 @@ function(setup_cpack)
     set(CPACK_PACKAGE_CONTACT "example@example.com")
     set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_SOURCE_DIR}/LICENSE")
     set(CPACK_RESOURCE_FILE_README "${CMAKE_SOURCE_DIR}/README.md")
+    set(CPACK_MONOLITHIC_INSTALL TRUE)
+    set(CPACK_VERBATIM_VARIABLES TRUE)
+    set(CPACK_PACKAGE_CHECKSUM "SHA256")
+    set(CPACK_PACKAGE_EXECUTABLES "offlinenote" "OfflineNote")
 
     # ── Generic settings
     set(CPACK_GENERATOR "ZIP")

@@ -1,0 +1,1756 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>FOLIO — OfflineNote Redesign Prototype v1.0</title>
+<!--
+  ╔══════════════════════════════════════════════════════════════╗
+  ║  FOLIO — OfflineNote Frontend Redesign                       ║
+  ║  Aesthetic: Obsidian Studio                                  ║
+  ║  Fonts: Fraunces (display) · Syne (UI) · Inconsolata (mono) ║
+  ║  Palette: #0B0B0C bg · #C8A255 accent · #FEFEF4 paper       ║
+  ║  Handoff to: developer implementation                        ║
+  ╚══════════════════════════════════════════════════════════════╝
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,600;0,9..144,800;1,9..144,300&family=Syne:wght@400;600;700;800&family=Inconsolata:wght@300;400;500;600&display=swap" rel="stylesheet"/>
+<style>
+/* ============================================================
+   DESIGN TOKENS
+============================================================ */
+:root {
+  /* Core palette */
+  --c-bg:         #0B0B0C;
+  --c-surface:    #111113;
+  --c-surface2:   #18181C;
+  --c-surface3:   #202026;
+  --c-border:     #222228;
+  --c-border2:    #2E2E38;
+  --c-fg:         #E4E4EC;
+  --c-fg-muted:   #80809A;
+  --c-fg-faint:   #5A5A78; /* adjusted for WCAG AA 4.5:1 contrast */
+  --c-accent:     #C8A255;
+  --c-accent-lt:  #D9B870;
+  --c-accent-dk:  #7A5F2A;
+  --c-accent-glow:rgba(200,162,85,.12);
+  --c-paper:      #FEFDF4;
+  --c-paper-dot:  #D8D8C8;
+  --c-blue:       #5B8DEF;
+  --c-red:        #DC5555;
+  --c-green:      #52B86A;
+  --c-yellow:     #E8C53A;
+
+  /* Layout */
+  --sidebar-w:    224px;
+  --topbar-h:     44px;
+  --statusbar-h:  26px;
+  --tool-w:       44px;
+  --paper-w:      595px;
+  --paper-h:      842px;
+
+  /* Typography */
+  --f-display:    'Fraunces', Georgia, serif;
+  --f-ui:         'Syne', system-ui, sans-serif;
+  --f-mono:       'Inconsolata', 'Consolas', monospace;
+
+  /* Misc */
+  --radius:       5px;
+  --shadow-paper: 0 8px 48px rgba(0,0,0,.7), 0 2px 8px rgba(0,0,0,.5);
+  --shadow-float: 0 4px 20px rgba(0,0,0,.5);
+  --t-fast:       .1s ease;
+  --t-med:        .18s ease;
+}
+
+/* ============================================================
+   RESET
+============================================================ */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+  width: 100%; height: 100%; overflow: hidden;
+  background: var(--c-bg);
+  color: var(--c-fg);
+  font-family: var(--f-ui);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+}
+button { font-family: inherit; cursor: pointer; }
+input, textarea { font-family: inherit; }
+
+/* Focus visible for keyboard navigation (WCAG 2.1 AA) */
+:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+button:focus:not(:focus-visible),
+a:focus:not(:focus-visible),
+input:focus:not(:focus-visible) {
+  outline: none;
+}
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--c-border2); border-radius: 4px; }
+
+/* ============================================================
+   APP SHELL
+============================================================ */
+.app {
+  display: grid;
+  grid-template-rows: var(--topbar-h) 1fr var(--statusbar-h);
+  grid-template-columns: var(--sidebar-w) 1fr;
+  grid-template-areas:
+    "topbar  topbar"
+    "sidebar canvas"
+    "status  status";
+  width: 100vw;
+  height: 100vh;
+}
+
+/* ============================================================
+   TOP BAR
+============================================================ */
+.topbar {
+  grid-area: topbar;
+  background: var(--c-surface);
+  border-bottom: 1px solid var(--c-border);
+  display: flex;
+  align-items: center;
+  position: relative;
+  z-index: 200;
+  gap: 0;
+}
+
+.brand {
+  width: var(--sidebar-w);
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 16px;
+  border-right: 1px solid var(--c-border);
+  flex-shrink: 0;
+}
+.brand-mark {
+  width: 26px; height: 26px;
+  background: var(--c-accent);
+  border-radius: 5px;
+  display: grid;
+  place-items: center;
+  font-family: var(--f-display);
+  font-size: 14px;
+  font-weight: 800;
+  color: #0B0B0C;
+  letter-spacing: -1px;
+  font-style: italic;
+}
+.brand-name {
+  font-family: var(--f-display);
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 1.5px;
+  color: var(--c-fg);
+}
+.brand-ver {
+  font-family: var(--f-mono);
+  font-size: 9px;
+  color: var(--c-fg-faint);
+  letter-spacing: 1px;
+  margin-top: 1px;
+}
+
+/* Button groups */
+.tb-group {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  padding: 0 6px;
+  border-right: 1px solid var(--c-border);
+  gap: 1px;
+}
+.tb-group:last-of-type { border-right: none; }
+
+.tb-btn {
+  height: 28px;
+  padding: 0 9px;
+  border: none;
+  background: transparent;
+  color: var(--c-fg-muted);
+  font-family: var(--f-ui);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .2px;
+  border-radius: var(--radius);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  transition: background var(--t-fast), color var(--t-fast);
+  white-space: nowrap;
+}
+.tb-btn:hover  { background: var(--c-surface2); color: var(--c-fg); }
+.tb-btn.active { background: var(--c-surface3); color: var(--c-fg); }
+.tb-btn svg    { width: 13px; height: 13px; flex-shrink: 0; }
+.tb-btn.accent { background: var(--c-accent-glow); color: var(--c-accent); }
+.tb-btn.accent:hover { background: rgba(200,162,85,.2); }
+
+/* Zoom cluster */
+.zoom-cluster {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  padding-right: 12px;
+}
+.zoom-val {
+  font-family: var(--f-mono);
+  font-size: 11px;
+  color: var(--c-fg-muted);
+  min-width: 40px;
+  text-align: center;
+  letter-spacing: .5px;
+}
+
+/* ============================================================
+   SIDEBAR
+============================================================ */
+.sidebar {
+  grid-area: sidebar;
+  background: var(--c-surface);
+  border-right: 1px solid var(--c-border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.sb-head {
+  padding: 12px 12px 10px;
+  border-bottom: 1px solid var(--c-border);
+  flex-shrink: 0;
+}
+
+.sb-eyebrow {
+  font-family: var(--f-mono);
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 1.8px;
+  text-transform: uppercase;
+  color: var(--c-fg-faint);
+  margin-bottom: 9px;
+}
+
+.search-wrap {
+  position: relative;
+  margin-bottom: 8px;
+}
+.search-ico {
+  position: absolute;
+  left: 8px; top: 50%;
+  transform: translateY(-50%);
+  color: var(--c-fg-faint);
+  pointer-events: none;
+}
+.search-input {
+  width: 100%;
+  height: 28px;
+  background: var(--c-surface2);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius);
+  padding: 0 10px 0 28px;
+  color: var(--c-fg);
+  font-size: 12px;
+  outline: none;
+  transition: border-color var(--t-fast);
+}
+.search-input::placeholder { color: var(--c-fg-faint); }
+.search-input:focus { border-color: var(--c-accent-dk); }
+
+.new-btn {
+  width: 100%;
+  height: 30px;
+  background: var(--c-accent);
+  border: none;
+  border-radius: var(--radius);
+  color: #0B0B0C;
+  font-family: var(--f-ui);
+  font-size: 12px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  letter-spacing: .2px;
+  transition: background var(--t-fast), transform .08s;
+}
+.new-btn:hover  { background: var(--c-accent-lt); }
+.new-btn:active { transform: scale(.98); }
+
+/* Note list */
+.note-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px;
+}
+
+.list-section-label {
+  font-family: var(--f-mono);
+  font-size: 9px;
+  font-weight: 400;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--c-fg-faint);
+  padding: 8px 6px 4px;
+}
+
+.note-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background var(--t-fast);
+  position: relative;
+  animation: fadeUp .25s ease both;
+}
+.note-item:hover { background: var(--c-surface2); }
+.note-item.sel   { background: var(--c-accent-glow); }
+.note-item.sel::before {
+  content: '';
+  position: absolute; left: 0; top: 5px; bottom: 5px;
+  width: 2.5px;
+  background: var(--c-accent);
+  border-radius: 2px;
+}
+
+.note-ico {
+  width: 28px; height: 28px;
+  background: var(--c-surface2);
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+  display: grid; place-items: center;
+  flex-shrink: 0;
+  transition: border-color var(--t-fast), background var(--t-fast);
+}
+.note-item.sel .note-ico {
+  background: rgba(200,162,85,.1);
+  border-color: var(--c-accent-dk);
+}
+
+.note-text { flex: 1; min-width: 0; }
+.note-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--c-fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.3;
+}
+.note-item.sel .note-title { color: var(--c-accent); }
+.note-meta {
+  font-family: var(--f-mono);
+  font-size: 9.5px;
+  color: var(--c-fg-faint);
+  margin-top: 1px;
+  letter-spacing: .2px;
+}
+.note-dot {
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: var(--c-accent);
+  flex-shrink: 0;
+  box-shadow: 0 0 4px var(--c-accent);
+}
+
+/* Note context actions (hover reveal) */
+.note-actions {
+  display: none;
+  gap: 2px;
+}
+.note-item:hover .note-actions { display: flex; }
+.note-action-btn {
+  width: 20px; height: 20px;
+  background: var(--c-surface3);
+  border: none;
+  border-radius: 3px;
+  color: var(--c-fg-muted);
+  display: grid; place-items: center;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.note-action-btn:hover { background: var(--c-border2); color: var(--c-fg); }
+.note-action-btn.del:hover { background: rgba(220,85,85,.15); color: var(--c-red); }
+
+/* Footer */
+.sb-foot {
+  padding: 8px 12px;
+  border-top: 1px solid var(--c-border);
+  flex-shrink: 0;
+}
+.sb-storage {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--f-mono);
+  font-size: 9.5px;
+  color: var(--c-fg-faint);
+  margin-bottom: 5px;
+  letter-spacing: .2px;
+}
+.sb-bar {
+  height: 2px;
+  background: var(--c-border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.sb-bar-fill {
+  height: 100%;
+  background: var(--c-accent);
+  width: 23%;
+  border-radius: 2px;
+  transition: width .3s ease;
+}
+
+/* ============================================================
+   CANVAS AREA
+============================================================ */
+.canvas {
+  grid-area: canvas;
+  background: var(--c-bg);
+  position: relative;
+  overflow: hidden;
+}
+
+/* Subtle background dot grid */
+.canvas::before {
+  content: '';
+  position: absolute; inset: 0;
+  background-image: radial-gradient(circle, rgba(255,255,255,.035) 1px, transparent 1px);
+  background-size: 22px 22px;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* Vignette */
+.canvas::after {
+  content: '';
+  position: absolute; inset: 0;
+  background: radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,.35) 100%);
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* ---- CANVAS INNER: flex container for rail + paper + nav ---- */
+.canvas-inner {
+  position: relative;
+  z-index: 2;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  overflow: auto;
+  padding: 24px 0;
+}
+
+/* ---- PAPER ---- */
+.paper {
+  position: relative;
+  width: var(--paper-w);
+  height: var(--paper-h);
+  background: var(--c-paper);
+  box-shadow: var(--shadow-paper);
+  flex-shrink: 0;
+  animation: paperIn .35s cubic-bezier(.2,.8,.2,1) .05s both;
+}
+.paper-inner { position: absolute; inset: 0; }
+.margin-guide {
+  position: absolute;
+  inset: 36px;
+  border: 1px dashed rgba(160,145,110,.2);
+  pointer-events: none;
+}
+
+/* ---- TOOL RAIL ---- */
+.tool-rail {
+  position: sticky;
+  top: 50%;
+  transform: translateY(-50%);
+  align-self: flex-start;
+  margin-top: 50vh;
+  width: var(--tool-w);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border2);
+  border-radius: 10px;
+  padding: 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  box-shadow: var(--shadow-float);
+  z-index: 100;
+  flex-shrink: 0;
+  animation: fadeLeft .3s ease .15s both;
+}
+
+.t-btn {
+  width: 34px; height: 34px;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  color: var(--c-fg-muted);
+  display: grid; place-items: center;
+  cursor: pointer;
+  position: relative;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.t-btn svg { width: 15px; height: 15px; pointer-events: none; }
+.t-btn:hover { background: var(--c-surface2); color: var(--c-fg); }
+.t-btn.sel {
+  background: var(--c-accent-glow);
+  color: var(--c-accent);
+}
+.t-btn.sel::before {
+  content: '';
+  position: absolute;
+  left: -6px; top: 50%;
+  transform: translateY(-50%);
+  width: 3px; height: 16px;
+  background: var(--c-accent);
+  border-radius: 2px;
+}
+
+/* Tooltip via data-tip */
+.t-btn::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: calc(100% + 9px);
+  top: 50%;
+  transform: translateY(-50%);
+  background: var(--c-surface2);
+  border: 1px solid var(--c-border2);
+  color: var(--c-fg);
+  font-family: var(--f-ui);
+  font-size: 11px;
+  font-weight: 500;
+  padding: 3px 8px;
+  border-radius: 4px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--t-fast);
+  z-index: 500;
+}
+.t-btn:hover::after { opacity: 1; }
+
+.t-divider {
+  height: 1px;
+  background: var(--c-border);
+  margin: 3px 1px;
+}
+
+.color-swatch-btn {
+  width: 34px; height: 34px;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  display: grid; place-items: center;
+  position: relative;
+  transition: background var(--t-fast);
+}
+.color-swatch-btn:hover { background: var(--c-surface2); }
+.color-swatch-btn::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: calc(100% + 9px); top: 50%;
+  transform: translateY(-50%);
+  background: var(--c-surface2);
+  border: 1px solid var(--c-border2);
+  color: var(--c-fg);
+  font-family: var(--f-ui);
+  font-size: 11px;
+  font-weight: 500;
+  padding: 3px 8px;
+  border-radius: 4px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--t-fast);
+  z-index: 500;
+}
+.color-swatch-btn:hover::after { opacity: 1; }
+
+.cswatch {
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  border: 2px solid rgba(255,255,255,.1);
+  transition: border-color var(--t-fast), transform .1s;
+}
+.color-swatch-btn:hover .cswatch { border-color: rgba(255,255,255,.25); transform: scale(1.1); }
+
+.size-indicator {
+  width: 20px; height: 20px;
+  display: grid; place-items: center;
+}
+.size-dot {
+  border-radius: 50%;
+  background: var(--c-fg-muted);
+  transition: width .1s, height .1s;
+}
+
+/* ---- PAGE THUMBNAILS ---- */
+.page-nav {
+  position: sticky;
+  top: 50%;
+  transform: translateY(-50%);
+  align-self: flex-start;
+  margin-top: 50vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  z-index: 100;
+  flex-shrink: 0;
+  animation: fadeRight .3s ease .15s both;
+}
+
+.pg-thumb {
+  width: 34px; height: 48px;
+  background: var(--c-paper);
+  border-radius: 2px;
+  border: 1.5px solid transparent;
+  cursor: pointer;
+  overflow: hidden;
+  box-shadow: 0 2px 8px rgba(0,0,0,.5);
+  transition: transform .12s, border-color .12s, box-shadow .12s;
+  position: relative;
+}
+.pg-thumb:hover { transform: scale(1.06); box-shadow: 0 4px 12px rgba(0,0,0,.6); }
+.pg-thumb.sel   { border-color: var(--c-accent); }
+.pg-num {
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  font-family: var(--f-mono);
+  font-size: 7px;
+  text-align: center;
+  color: var(--c-fg-faint);
+  background: rgba(0,0,0,.45);
+  padding: 1px 0;
+  letter-spacing: .5px;
+}
+.pg-add {
+  width: 34px; height: 22px;
+  background: var(--c-surface2);
+  border: 1px dashed var(--c-border2);
+  border-radius: 3px;
+  color: var(--c-fg-faint);
+  font-size: 16px;
+  line-height: 1;
+  display: grid; place-items: center;
+  cursor: pointer;
+  transition: border-color var(--t-fast), color var(--t-fast);
+}
+.pg-add:hover { border-color: var(--c-accent-dk); color: var(--c-accent); }
+
+/* ---- COLOR POPUP ---- */
+.color-popup {
+  position: fixed;
+  width: 148px;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border2);
+  border-radius: 8px;
+  padding: 10px;
+  box-shadow: var(--shadow-float);
+  z-index: 300;
+  display: none;
+  animation: scaleIn .12s ease;
+}
+.color-popup.open { display: block; }
+
+.cp-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 5px;
+  margin-bottom: 10px;
+}
+.cp-dot {
+  width: 22px; height: 22px;
+  border-radius: 4px;
+  cursor: pointer;
+  border: 1.5px solid transparent;
+  transition: transform .1s, border-color .1s;
+}
+.cp-dot:hover { transform: scale(1.12); }
+.cp-dot.sel   { border-color: white; }
+
+.cp-label {
+  font-family: var(--f-mono);
+  font-size: 9px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--c-fg-faint);
+  margin-bottom: 5px;
+}
+.cp-hex {
+  width: 100%;
+  height: 24px;
+  background: var(--c-surface2);
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+  padding: 0 8px;
+  color: var(--c-fg);
+  font-family: var(--f-mono);
+  font-size: 11px;
+  outline: none;
+  transition: border-color var(--t-fast);
+}
+.cp-hex:focus { border-color: var(--c-accent-dk); }
+
+/* ---- SIZE POPUP ---- */
+.size-popup {
+  position: fixed;
+  width: 136px;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border2);
+  border-radius: 8px;
+  padding: 10px 12px;
+  box-shadow: var(--shadow-float);
+  z-index: 300;
+  display: none;
+  animation: scaleIn .12s ease;
+}
+.size-popup.open { display: block; }
+
+.sp-label {
+  font-family: var(--f-mono);
+  font-size: 9px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--c-fg-faint);
+  margin-bottom: 8px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.sp-val {
+  color: var(--c-fg-muted);
+  letter-spacing: .3px;
+}
+.sp-slider {
+  width: 100%;
+  accent-color: var(--c-accent);
+  margin-bottom: 8px;
+}
+.sp-presets {
+  display: flex;
+  gap: 4px;
+  justify-content: space-between;
+}
+.sp-preset {
+  flex: 1;
+  height: 28px;
+  background: var(--c-surface2);
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+  display: grid; place-items: center;
+  cursor: pointer;
+  transition: background var(--t-fast), border-color var(--t-fast);
+}
+.sp-preset:hover { background: var(--c-surface3); }
+.sp-preset.sel   { background: var(--c-accent-glow); border-color: var(--c-accent-dk); }
+
+/* ---- PROPS PANEL ---- */
+.props-panel {
+  position: absolute;
+  right: 0; top: 0; bottom: 0;
+  width: 200px;
+  background: var(--c-surface);
+  border-left: 1px solid var(--c-border);
+  padding: 14px;
+  overflow-y: auto;
+  transform: translateX(100%);
+  transition: transform var(--t-med);
+  z-index: 100;
+}
+.props-panel.open { transform: translateX(0); }
+
+.pp-section { margin-bottom: 18px; }
+.pp-title {
+  font-family: var(--f-mono);
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--c-fg-faint);
+  margin-bottom: 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--c-border);
+}
+.pp-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 7px;
+}
+.pp-key {
+  font-size: 11px;
+  color: var(--c-fg-muted);
+  min-width: 44px;
+  flex-shrink: 0;
+}
+.pp-inp {
+  flex: 1;
+  height: 24px;
+  background: var(--c-surface2);
+  border: 1px solid var(--c-border);
+  border-radius: 3px;
+  padding: 0 7px;
+  color: var(--c-fg);
+  font-family: var(--f-mono);
+  font-size: 11px;
+  outline: none;
+  transition: border-color var(--t-fast);
+}
+.pp-inp:focus { border-color: var(--c-accent-dk); }
+.pp-unit {
+  font-family: var(--f-mono);
+  font-size: 10px;
+  color: var(--c-fg-faint);
+}
+.pp-segmented {
+  display: flex;
+  gap: 4px;
+}
+.pp-seg {
+  flex: 1;
+  height: 26px;
+  background: var(--c-surface2);
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+  color: var(--c-fg-muted);
+  font-size: 11px;
+  font-family: var(--f-ui);
+  display: grid; place-items: center;
+  cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+}
+.pp-seg:hover { background: var(--c-surface3); color: var(--c-fg); }
+.pp-seg.sel   { background: var(--c-accent-glow); border-color: var(--c-accent-dk); color: var(--c-accent); }
+.pp-grid-btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.pp-grid-btn {
+  height: 24px;
+  padding: 0 8px;
+  background: var(--c-surface2);
+  border: 1px solid var(--c-border);
+  border-radius: 3px;
+  color: var(--c-fg-muted);
+  font-size: 11px;
+  cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.pp-grid-btn:hover { background: var(--c-surface3); color: var(--c-fg); }
+.pp-grid-btn.sel   { background: var(--c-accent-glow); border-color: var(--c-accent-dk); color: var(--c-accent); }
+
+/* ---- CONTEXT MENU ---- */
+.ctx {
+  position: fixed;
+  width: 164px;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border2);
+  border-radius: 7px;
+  padding: 4px;
+  box-shadow: 0 8px 28px rgba(0,0,0,.6);
+  z-index: 9999;
+  display: none;
+  animation: scaleIn .1s ease;
+}
+.ctx.open { display: block; }
+.ctx-item {
+  padding: 6px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--c-fg-muted);
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.ctx-item:hover { background: var(--c-surface2); color: var(--c-fg); }
+.ctx-item svg   { width: 12px; height: 12px; flex-shrink: 0; }
+.ctx-item.danger:hover { background: rgba(220,85,85,.1); color: var(--c-red); }
+.ctx-hr { height: 1px; background: var(--c-border); margin: 3px 0; }
+.ctx-shortcut {
+  margin-left: auto;
+  font-family: var(--f-mono);
+  font-size: 10px;
+  color: var(--c-fg-faint);
+}
+
+/* ============================================================
+   STATUS BAR
+============================================================ */
+.statusbar {
+  grid-area: status;
+  background: var(--c-surface);
+  border-top: 1px solid var(--c-border);
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  gap: 0;
+  overflow: hidden;
+}
+
+.sb-seg {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 10px;
+  height: 100%;
+  border-right: 1px solid var(--c-border);
+  font-family: var(--f-mono);
+  font-size: 10px;
+  color: var(--c-fg-faint);
+  white-space: nowrap;
+  letter-spacing: .3px;
+}
+.sb-seg:first-child { padding-left: 0; }
+.sb-seg b { color: var(--c-fg-muted); font-weight: 500; }
+
+.sb-tool {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--f-mono);
+  font-size: 10px;
+  color: var(--c-accent);
+  letter-spacing: .3px;
+}
+.sb-tool-led {
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: var(--c-accent);
+  box-shadow: 0 0 5px var(--c-accent);
+  animation: pulse 2.5s ease infinite;
+}
+
+/* ============================================================
+   ANIMATIONS
+============================================================ */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(5px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes fadeLeft {
+  from { opacity: 0; transform: translateY(-50%) translateX(-8px); }
+  to   { opacity: 1; transform: translateY(-50%) translateX(0); }
+}
+@keyframes fadeRight {
+  from { opacity: 0; transform: translateY(-50%) translateX(8px); }
+  to   { opacity: 1; transform: translateY(-50%) translateX(0); }
+}
+@keyframes paperIn {
+  from { opacity: 0; transform: scale(.97) translateY(6px); }
+  to   { opacity: 1; transform: scale(1) translateY(0); }
+}
+@keyframes scaleIn {
+  from { opacity: 0; transform: scale(.95); }
+  to   { opacity: 1; transform: scale(1); }
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: .45; }
+}
+
+/* Stagger note items */
+.note-item:nth-child(1) { animation-delay: .04s; }
+.note-item:nth-child(2) { animation-delay: .07s; }
+.note-item:nth-child(3) { animation-delay: .10s; }
+.note-item:nth-child(4) { animation-delay: .13s; }
+.note-item:nth-child(5) { animation-delay: .16s; }
+.note-item:nth-child(6) { animation-delay: .19s; }
+
+/* ============================================================
+   HOVER STATE: paper cursor
+============================================================ */
+.paper { cursor: crosshair; }
+.paper.tool-select   { cursor: default; }
+.paper.tool-text     { cursor: text; }
+.paper.tool-eraser   { cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'%3E%3Crect x='5' y='5' width='10' height='10' rx='2' fill='%23aaa' fill-opacity='.8'/%3E%3C/svg%3E") 10 10, default; }
+</style>
+</head>
+
+<body>
+<div class="app">
+
+  <!-- ══════════ TOPBAR ══════════ -->
+  <header class="topbar">
+    <!-- Brand -->
+    <div class="brand">
+      <div class="brand-mark">ƒ</div>
+      <div>
+        <div class="brand-name">FOLIO</div>
+        <div class="brand-ver">v1.0</div>
+      </div>
+    </div>
+
+    <!-- File actions -->
+    <div class="tb-group">
+      <button class="tb-btn" onclick="showToast('新增筆記…')" title="Ctrl+N">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 5v14M5 12h14"/>
+        </svg>
+        新增
+      </button>
+      <button class="tb-btn accent" onclick="showToast('已儲存')" title="Ctrl+S">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+          <polyline points="17 21 17 13 7 13 7 21"/>
+          <polyline points="7 3 7 8 15 8"/>
+        </svg>
+        儲存
+      </button>
+    </div>
+
+    <!-- Import / Export -->
+    <div class="tb-group">
+      <button class="tb-btn" onclick="showToast('選擇 PDF 或 .onote…')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="17 8 12 3 7 8"/>
+          <line x1="12" y1="3" x2="12" y2="15"/>
+        </svg>
+        匯入
+      </button>
+      <button class="tb-btn" onclick="showToast('匯出選項…')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="7 10 12 15 17 10"/>
+          <line x1="12" y1="15" x2="12" y2="3"/>
+        </svg>
+        匯出
+      </button>
+    </div>
+
+    <!-- Undo / Redo -->
+    <div class="tb-group">
+      <button class="tb-btn" title="Ctrl+Z">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="9 14 4 9 9 4"/>
+          <path d="M20 20v-7a4 4 0 0 0-4-4H4"/>
+        </svg>
+        復原
+      </button>
+      <button class="tb-btn" title="Ctrl+Y">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="15 14 20 9 15 4"/>
+          <path d="M4 20v-7a4 4 0 0 1 4-4h12"/>
+        </svg>
+        重做
+      </button>
+    </div>
+
+    <!-- Page controls -->
+    <div class="tb-group">
+      <button class="tb-btn" onclick="prevPage()" title="上一頁">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="15 18 9 12 15 6"/>
+        </svg>
+      </button>
+      <span class="zoom-val" id="pageVal" style="min-width:50px;">頁 1 / 3</span>
+      <button class="tb-btn" onclick="nextPage()" title="下一頁">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="9 18 15 12 9 6"/>
+        </svg>
+      </button>
+      <button class="tb-btn" onclick="showToast('新增頁面')" title="新增頁面">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+          <polyline points="14 2 14 8 20 8"/>
+          <line x1="12" y1="18" x2="12" y2="12"/>
+          <line x1="9" y1="15" x2="15" y2="15"/>
+        </svg>
+      </button>
+    </div>
+
+    <!-- Zoom cluster (right-aligned) -->
+    <div class="zoom-cluster">
+      <button class="tb-btn" id="zoomOut" title="縮小">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="5" y1="12" x2="19" y2="12"/>
+        </svg>
+      </button>
+      <span class="zoom-val" id="zoomVal">100%</span>
+      <button class="tb-btn" id="zoomIn" title="放大">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="12" y1="5" x2="12" y2="19"/>
+          <line x1="5" y1="12" x2="19" y2="12"/>
+        </svg>
+      </button>
+      <button class="tb-btn" onclick="resetZoom()" style="font-family:var(--f-mono);font-size:10px;">FIT</button>
+      <button class="tb-btn" id="propToggle" title="頁面設定" style="margin-left:4px;">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
+          <path d="M4.93 4.93a10 10 0 0 0 0 14.14"/>
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- ══════════ SIDEBAR ══════════ -->
+  <aside class="sidebar" aria-label="側邊欄">
+    <div class="sb-head">
+      <div class="sb-eyebrow">Notebooks</div>
+      <div class="search-wrap">
+        <svg class="search-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <circle cx="11" cy="11" r="8"/>
+          <path d="m21 21-4.35-4.35"/>
+        </svg>
+        <input class="search-input" type="text" placeholder="搜尋筆記名稱或內容…" aria-label="搜尋筆記"/>
+      </div>
+      <button class="new-btn" onclick="showToast('新增筆記…')" aria-label="新增筆記">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" aria-hidden="true">
+          <path d="M12 5v14M5 12h14"/>
+        </svg>
+        新增筆記
+      </button>
+    </div>
+
+    <nav class="note-list" aria-label="筆記列表">
+      <div class="list-section-label">最近</div>
+
+      <div class="note-item sel" role="option" aria-selected="true" onclick="selectNote(this, '設計評審筆記')">
+        <div class="note-ico">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#C8A255" stroke-width="2">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+          </svg>
+        </div>
+        <div class="note-text">
+          <div class="note-title">設計評審筆記</div>
+          <div class="note-meta">3 頁 · 今天 17:32</div>
+        </div>
+        <div class="note-dot"></div>
+      </div>
+
+      <div class="note-item" role="option" aria-selected="false" onclick="selectNote(this, '專案架構圖')">
+        <div class="note-ico">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#80809A" stroke-width="2">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+          </svg>
+        </div>
+        <div class="note-text">
+          <div class="note-title">專案架構圖</div>
+          <div class="note-meta">7 頁 · 昨天</div>
+        </div>
+        <div class="note-actions">
+          <button class="note-action-btn" title="重新命名">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
+          </button>
+          <button class="note-action-btn del" title="刪除">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="note-item" role="option" aria-selected="false" onclick="selectNote(this, '開會記錄 0414')">
+        <div class="note-ico">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#80809A" stroke-width="2">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+          </svg>
+        </div>
+        <div class="note-text">
+          <div class="note-title">開會記錄 0414</div>
+          <div class="note-meta">1 頁 · 4月14日</div>
+        </div>
+        <div class="note-actions">
+          <button class="note-action-btn" title="重新命名">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
+          </button>
+          <button class="note-action-btn del" title="刪除">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="list-section-label" style="margin-top:6px;">所有筆記</div>
+
+      <div class="note-item" role="option" aria-selected="false" onclick="selectNote(this, '讀書心得 — 設計心理學')">
+        <div class="note-ico">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#80809A" stroke-width="2">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+          </svg>
+        </div>
+        <div class="note-text">
+          <div class="note-title">讀書心得 — 設計心理學</div>
+          <div class="note-meta">12 頁 · 3月28日</div>
+        </div>
+        <div class="note-actions">
+          <button class="note-action-btn" title="重新命名">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
+          </button>
+          <button class="note-action-btn del" title="刪除">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="note-item" role="option" aria-selected="false" onclick="selectNote(this, '空白筆記')">
+        <div class="note-ico">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#80809A" stroke-width="2">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+          </svg>
+        </div>
+        <div class="note-text">
+          <div class="note-title">空白筆記</div>
+          <div class="note-meta">1 頁 · 3月15日</div>
+        </div>
+        <div class="note-actions">
+          <button class="note-action-btn del" title="刪除">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+          </button>
+        </div>
+      </div>
+    </nav>
+
+    <div class="sb-foot">
+      <div class="sb-storage">
+        <span>5 筆記 · data/notes/</span>
+        <span>23%</span>
+      </div>
+      <div class="sb-bar">
+        <div class="sb-bar-fill"></div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ══════════ CANVAS ══════════ -->
+  <main class="canvas" id="canvasArea">
+
+    <!-- CANVAS INNER: flex container for rail + paper + nav -->
+    <div class="canvas-inner" id="canvasInner">
+
+      <!-- TOOL RAIL -->
+      <div class="tool-rail" id="toolRail" role="radiogroup" aria-label="工具選擇">
+      <button class="t-btn sel" data-tip="筆 (P)" onclick="setTool(this,0)" role="radio" aria-checked="true" aria-label="筆工具">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+          <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>
+        </svg>
+      </button>
+      <button class="t-btn" data-tip="螢光筆 (H)" onclick="setTool(this,1)" role="radio" aria-checked="false" aria-label="螢光筆工具">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+          <path d="m9 11-6 6v3h9l3-3"/>
+          <path d="m22 12-4.6 4.6a2 2 0 0 1-2.8 0l-5.2-5.2a2 2 0 0 1 0-2.8L14 4"/>
+        </svg>
+      </button>
+      <button class="t-btn" data-tip="橡皮擦 (E)" onclick="setTool(this,2)" role="radio" aria-checked="false" aria-label="橡皮擦工具">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+          <path d="M20 20H7L3 16l9.5-9.5 7.5 7.5z"/>
+          <line x1="6" y1="17" x2="13" y2="10"/>
+        </svg>
+      </button>
+      <button class="t-btn" data-tip="文字 (T)" onclick="setTool(this,3)" role="radio" aria-checked="false" aria-label="文字工具">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+          <polyline points="4 7 4 4 20 4 20 7"/>
+          <line x1="9" y1="20" x2="15" y2="20"/>
+          <line x1="12" y1="4" x2="12" y2="20"/>
+        </svg>
+      </button>
+      <button class="t-btn" data-tip="選取 (S)" onclick="setTool(this,4)" role="radio" aria-checked="false" aria-label="選取工具">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+          <path d="m3 3 7.07 16.97 2.51-7.39 7.39-2.51L3 3z"/>
+          <path d="m13 13 6 6"/>
+        </svg>
+      </button>
+
+      <div class="t-divider"></div>
+
+      <!-- Color button -->
+      <button class="color-swatch-btn" data-tip="顏色" onclick="toggleColor(event)">
+        <div class="cswatch" id="colorDot" style="background:#1a1a2e;"></div>
+      </button>
+
+      <!-- Size button -->
+      <button class="color-swatch-btn" data-tip="筆刷大小" onclick="toggleSize(event)">
+        <div class="size-indicator">
+          <div class="size-dot" id="sizeDot" style="width:5px;height:5px;"></div>
+        </div>
+      </button>
+    </div>
+
+    <!-- PAPER -->
+    <div class="paper" id="paper">
+      <div class="paper-inner">
+        <!-- Margin guides -->
+        <div class="margin-guide"></div>
+        <!-- SVG content (prototype mockup of a note) -->
+        <svg width="595" height="842" viewBox="0 0 595 842" xmlns="http://www.w3.org/2000/svg" style="position:absolute;inset:0;">
+          <defs>
+            <pattern id="dotpat" width="20" height="20" patternUnits="userSpaceOnUse">
+              <circle cx="10" cy="10" r=".7" fill="#B8B8A8" opacity=".55"/>
+            </pattern>
+          </defs>
+          <!-- Dot grid background -->
+          <rect width="595" height="842" fill="url(#dotpat)"/>
+
+          <!-- Title -->
+          <text x="58" y="76" font-family="'Fraunces',Georgia,serif" font-size="21"
+                font-style="italic" fill="#1E1E2A" opacity=".88">設計評審筆記</text>
+          <line x1="58" y1="84" x2="270" y2="84" stroke="#C8A255" stroke-width="1.2" opacity=".5"/>
+          <text x="276" y="83" font-family="Inconsolata,monospace" font-size="9"
+                fill="#9A9A88" letter-spacing="1">2026-04-15</text>
+
+          <!-- Handwriting simulation — pen strokes -->
+          <g stroke="#1E1E30" stroke-width="1.6" fill="none"
+             stroke-linecap="round" stroke-linejoin="round" opacity=".72">
+            <path d="M58 118 Q78 113 100 119 Q124 125 148 117 Q170 111 192 118"/>
+            <path d="M58 137 Q90 132 140 137 Q180 142 220 135 Q248 130 270 137"/>
+            <path d="M58 156 Q85 151 120 156 Q155 161 185 154"/>
+            <path d="M58 175 Q75 170 98 175 Q120 180 148 173 Q172 168 198 175 Q222 181 246 173"/>
+          </g>
+
+          <!-- Highlighted line -->
+          <rect x="56" y="196" width="230" height="14" fill="#FFE55A" opacity=".32" rx="1"/>
+          <text x="58" y="207" font-family="'Syne',sans-serif" font-size="10.5"
+                fill="#2A2A20" opacity=".85">需要重構 AppController → 串接安全流程</text>
+
+          <!-- More strokes -->
+          <g stroke="#1E1E30" stroke-width="1.5" fill="none"
+             stroke-linecap="round" stroke-linejoin="round" opacity=".65">
+            <path d="M58 232 Q100 227 168 232 Q210 237 244 230"/>
+            <path d="M58 250 Q88 245 160 250 Q200 255 232 248"/>
+            <path d="M58 268 Q82 263 128 268 Q165 273 195 266 Q218 261 240 268"/>
+            <path d="M58 286 Q95 281 158 286"/>
+          </g>
+
+          <!-- Sketch diagram box -->
+          <rect x="58" y="310" width="195" height="115" rx="3"
+                stroke="#999988" stroke-width="1" fill="#F8F8EE"
+                stroke-dasharray="5 4" opacity=".6"/>
+          <text x="105" y="373" font-family="'Syne',sans-serif" font-size="10"
+                fill="#888878">[架構草圖區]</text>
+
+          <!-- Right-side annotation -->
+          <line x1="420" y1="110" x2="420" y2="340" stroke="#DDD8C0" stroke-width=".8" opacity=".5"/>
+          <g stroke="#666655" stroke-width="1.3" fill="none"
+             stroke-linecap="round" stroke-linejoin="round" opacity=".55">
+            <path d="M438 128 Q455 123 476 128 Q492 133 510 126"/>
+            <path d="M438 144 Q462 139 498 144"/>
+            <path d="M438 160 Q458 155 488 160 Q504 165 516 158"/>
+            <path d="M438 176 Q450 171 474 176"/>
+          </g>
+
+          <!-- Selection overlay (demo: first set of strokes selected) -->
+          <rect x="50" y="108" width="230" height="84" rx="3"
+                stroke="#5B8DEF" stroke-width="1.2" fill="rgba(91,141,239,.05)"
+                stroke-dasharray="5 3"/>
+          <rect x="276" y="108" width="8" height="8" rx="1.5" fill="#5B8DEF" opacity=".9"/>
+          <rect x="276" y="180" width="8" height="8" rx="1.5" fill="#5B8DEF" opacity=".9"/>
+          <rect x="50" y="188" width="8" height="8" rx="1.5" fill="#5B8DEF" opacity=".9"/>
+          <rect x="163" y="188" width="8" height="8" rx="1.5" fill="#5B8DEF" opacity=".9"/>
+        </svg>
+      </div>
+    </div>
+
+    <!-- PAGE THUMBNAILS (positioned by JS) -->
+    <div class="page-nav" id="pageNav" role="navigation" aria-label="頁面導覽">
+      <div class="pg-thumb sel" role="button" tabindex="0" aria-label="頁面 1" onclick="selPage(this,1)">
+        <svg width="34" height="48" viewBox="0 0 595 842">
+          <rect width="595" height="842" fill="url(#dotpat)"/>
+          <text x="60" y="100" font-family="serif" font-style="italic" font-size="160" fill="#DDD">N</text>
+        </svg>
+        <div class="pg-num">1</div>
+      </div>
+      <div class="pg-thumb" role="button" tabindex="0" aria-label="頁面 2" onclick="selPage(this,2)">
+        <div style="width:100%;height:100%;background:var(--c-paper);"></div>
+        <div class="pg-num">2</div>
+      </div>
+      <div class="pg-thumb" role="button" tabindex="0" aria-label="頁面 3" onclick="selPage(this,3)">
+        <div style="width:100%;height:100%;background:var(--c-paper);"></div>
+        <div class="pg-num">3</div>
+      </div>
+      <button class="pg-add" title="新增頁面" aria-label="新增頁面" onclick="showToast('新增頁面')">+</button>
+    </div>
+
+    </div><!-- /.canvas-inner -->
+
+    <!-- COLOR POPUP (fixed position) -->
+    <div class="color-popup" id="colorPopup">
+      <div class="cp-grid">
+        <div class="cp-dot sel" style="background:#1a1a2e;" onclick="pickColor(this,'#1a1a2e')"></div>
+        <div class="cp-dot" style="background:#DC5555;" onclick="pickColor(this,'#DC5555')"></div>
+        <div class="cp-dot" style="background:#5B8DEF;" onclick="pickColor(this,'#5B8DEF')"></div>
+        <div class="cp-dot" style="background:#52B86A;" onclick="pickColor(this,'#52B86A')"></div>
+        <div class="cp-dot" style="background:#C8A255;" onclick="pickColor(this,'#C8A255')"></div>
+        <div class="cp-dot" style="background:#A855F7;" onclick="pickColor(this,'#A855F7')"></div>
+        <div class="cp-dot" style="background:#F97316;" onclick="pickColor(this,'#F97316')"></div>
+        <div class="cp-dot" style="background:#EC4899;" onclick="pickColor(this,'#EC4899')"></div>
+        <div class="cp-dot" style="background:#64748B;" onclick="pickColor(this,'#64748B')"></div>
+        <div class="cp-dot" style="background:#fff;outline:1px solid #ccc;" onclick="pickColor(this,'#ffffff')"></div>
+      </div>
+      <div class="cp-label">自訂顏色</div>
+      <input class="cp-hex" id="hexInput" value="#1a1a2e" maxlength="7" onchange="pickColorHex(this.value)"/>
+    </div>
+
+    <!-- SIZE POPUP -->
+    <div class="size-popup" id="sizePopup">
+      <div class="sp-label">
+        筆刷大小
+        <span class="sp-val" id="sizeLabel">2 pt</span>
+      </div>
+      <input type="range" class="sp-slider" min="0.5" max="20" step="0.5"
+             value="2" id="sizeSlider" oninput="onSizeChange(this.value)"/>
+      <div class="sp-presets">
+        <div class="sp-preset sel" onclick="setPreset(this,1)" title="細">
+          <div style="width:3px;height:3px;border-radius:50%;background:var(--c-fg-muted);"></div>
+        </div>
+        <div class="sp-preset" onclick="setPreset(this,3)" title="中">
+          <div style="width:5px;height:5px;border-radius:50%;background:var(--c-fg-muted);"></div>
+        </div>
+        <div class="sp-preset" onclick="setPreset(this,6)" title="粗">
+          <div style="width:8px;height:8px;border-radius:50%;background:var(--c-fg-muted);"></div>
+        </div>
+        <div class="sp-preset" onclick="setPreset(this,14)" title="極粗">
+          <div style="width:11px;height:11px;border-radius:50%;background:var(--c-fg-muted);"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- PROPS PANEL -->
+    <div class="props-panel" id="propsPanel">
+      <div class="pp-section">
+        <div class="pp-title">頁面尺寸</div>
+        <div class="pp-row">
+          <span class="pp-key">寬 W</span>
+          <input class="pp-inp" type="number" value="595" min="200" max="2000"/>
+          <span class="pp-unit">pt</span>
+        </div>
+        <div class="pp-row">
+          <span class="pp-key">高 H</span>
+          <input class="pp-inp" type="number" value="842" min="200" max="2000"/>
+          <span class="pp-unit">pt</span>
+        </div>
+      </div>
+      <div class="pp-section">
+        <div class="pp-title">方向</div>
+        <div class="pp-segmented">
+          <button class="pp-seg sel" onclick="toggleSeg(this)">直式</button>
+          <button class="pp-seg"     onclick="toggleSeg(this)">橫式</button>
+        </div>
+      </div>
+      <div class="pp-section">
+        <div class="pp-title">邊距 (pt)</div>
+        <div class="pp-row">
+          <span class="pp-key">上</span>
+          <input class="pp-inp" type="number" value="36" min="0" max="200"/>
+        </div>
+        <div class="pp-row">
+          <span class="pp-key">下</span>
+          <input class="pp-inp" type="number" value="36" min="0" max="200"/>
+        </div>
+        <div class="pp-row">
+          <span class="pp-key">左</span>
+          <input class="pp-inp" type="number" value="36" min="0" max="200"/>
+        </div>
+        <div class="pp-row">
+          <span class="pp-key">右</span>
+          <input class="pp-inp" type="number" value="36" min="0" max="200"/>
+        </div>
+      </div>
+      <div class="pp-section">
+        <div class="pp-title">背景格線</div>
+        <div class="pp-grid-btns">
+          <button class="pp-grid-btn sel" onclick="toggleGridBtn(this)">點格</button>
+          <button class="pp-grid-btn"     onclick="toggleGridBtn(this)">橫線</button>
+          <button class="pp-grid-btn"     onclick="toggleGridBtn(this)">方格</button>
+          <button class="pp-grid-btn"     onclick="toggleGridBtn(this)">空白</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- CONTEXT MENU -->
+    <div class="ctx" id="ctxMenu">
+      <div class="ctx-item" onclick="hideCtx()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="9" y="9" width="13" height="13" rx="2"/>
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+        </svg>
+        複製
+        <span class="ctx-shortcut">Ctrl C</span>
+      </div>
+      <div class="ctx-item" onclick="hideCtx()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="9 10 4 15 9 20"/>
+          <path d="M20 4v7a4 4 0 0 1-4 4H4"/>
+        </svg>
+        移至前方
+      </div>
+      <div class="ctx-item" onclick="hideCtx()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="15 10 20 15 15 20"/>
+          <path d="M4 4v7a4 4 0 0 0 4 4h12"/>
+        </svg>
+        移至後方
+      </div>
+      <div class="ctx-hr"></div>
+      <div class="ctx-item danger" onclick="hideCtx()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="3 6 5 6 21 6"/>
+          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+        </svg>
+        刪除
+        <span class="ctx-shortcut">Del</span>
+      </div>
+    </div>
+
+    <!-- TOAST notification -->
+    <div id="toast" style="
+      position:absolute; bottom:16px; left:50%; transform:translateX(-50%);
+      background:var(--c-surface2); border:1px solid var(--c-border2);
+      color:var(--c-fg); font-family:var(--f-mono); font-size:11px;
+      padding:6px 14px; border-radius:20px; white-space:nowrap;
+      opacity:0; transition:opacity .15s; pointer-events:none; z-index:9999;
+      letter-spacing:.3px;
+    "></div>
+  </main>
+
+  <!-- ══════════ STATUS BAR ══════════ -->
+  <footer class="statusbar">
+    <div class="sb-seg">
+      <b id="sbNote">設計評審筆記</b>
+    </div>
+    <div class="sb-seg">直式 A4</div>
+    <div class="sb-seg">頁 <b id="sbPage">1</b> / 3</div>
+    <div class="sb-seg">筆跡 <b>12</b></div>
+    <div class="sb-seg">文字 <b>2</b></div>
+    <div class="sb-seg">圖片 <b>0</b></div>
+    <div class="sb-tool">
+      <div class="sb-tool-led"></div>
+      <span id="sbTool">筆 (Pen)</span>
+    </div>
+  </footer>
+</div>
+
+<script>
+/* =====================================================
+   STATE
+===================================================== */
+const TOOLS = ['筆 (Pen)','螢光筆 (Highlight)','橡皮擦 (Eraser)','文字 (Text)','選取 (Select)'];
+const CURSOR = ['crosshair','crosshair','crosshair','text','default'];
+let currentPage = 1;
+let totalPages  = 3;
+let zoomLevel   = 100;
+
+/* =====================================================
+   LAYOUT: position tool rail + page nav
+   Note: With canvas-inner flex layout, JS positioning is no longer needed!
+   Tool rail and page nav use CSS sticky positioning.
+===================================================== */
+function layout() {
+  // Layout function kept for potential future use,
+  // but no longer required for positioning with flex + sticky
+  const inner = document.getElementById('canvasInner');
+  if (!inner) return;
+}
+
+// Use ResizeObserver instead of setTimeout for initialization
+const canvasArea = document.getElementById('canvasArea');
+if (canvasArea && typeof ResizeObserver !== 'undefined') {
+  const resizeObserver = new ResizeObserver(() => {
+    layout();
+  });
+  resizeObserver.observe(canvasArea);
+}
+
+window.addEventListener('resize', layout);
+window.addEventListener('load', layout);
+// Removed: setTimeout(layout, 50);
+
+/* =====================================================
+   TOOLS
+===================================================== */
+function setTool(btn, idx) {
+  document.querySelectorAll('.t-btn').forEach(b => {
+    b.classList.remove('sel');
+    b.setAttribute('aria-checked', 'false');
+  });
+  btn.classList.add('sel');
+  btn.setAttribute('aria-checked', 'true');
+  document.getElementById('sbTool').textContent = TOOLS[idx];
+  document.getElementById('paper').className = 'paper tool-' + ['pen','hl','eraser','text','select'][idx];
+}
+
+/* =====================================================
+   NOTE SELECTION
+===================================================== */
+function selectNote(el, name) {
+  document.querySelectorAll('.note-item').forEach(n => n.classList.remove('sel'));
+  el.classList.add('sel');
+  document.getElementById('sbNote').textContent = name;
+}
+
+/* =====================================================
+   PAGE NAVIGATION
+===================================================== */
+function selPage(thumb, num) {
+  document.querySelectorAll('.pg-thumb').forEach(t => t.classList.remove('sel'));
+  thumb.classList.add('sel');
+  currentPage = num;
+  document.getElementById('sbPage').textContent = num;
+  document.getElementById('pageVal').textContent = '頁 ' + num + ' / ' + totalPages;
+}
+function prevPage() {
+  if (currentPage <= 1) return;
+  const thumbs = document.querySelectorAll('.pg-thumb');
+  selPage(thumbs[currentPage - 2], currentPage - 1);
+}
+function nextPage() {
+  if (currentPage >= totalPages) return;
+  const thumbs = document.querySelectorAll('.pg-thumb');
+  selPage(thumbs[currentPage], currentPage + 1);
+}
+
+/* =====================================================
+   ZOOM
+===================================================== */
+function resetZoom() { zoomLevel = 100; document.getElementById('zoomVal').textContent = '100%'; }
+document.getElementById('zoomIn').onclick  = () => {
+  zoomLevel = Math.min(500, zoomLevel + 10);
+  document.getElementById('zoomVal').textContent = zoomLevel + '%';
+};
+document.getElementById('zoomOut').onclick = () => {
+  zoomLevel = Math.max(25, zoomLevel - 10);
+  document.getElementById('zoomVal').textContent = zoomLevel + '%';
+};
+
+/* =====================================================
+   COLOR PANEL
+===================================================== */
+function toggleColor(e) {
+  e.stopPropagation();
+  const pop = document.getElementById('colorPopup');
+  document.getElementById('sizePopup').classList.remove('open');
+  pop.classList.toggle('open');
+  if (pop.classList.contains('open')) positionPopup(pop, e.currentTarget);
+}
+function pickColor(dot, hex) {
+  document.querySelectorAll('.cp-dot').forEach(d => d.classList.remove('sel'));
+  dot.classList.add('sel');
+  document.getElementById('colorDot').style.background = hex;
+  document.getElementById('hexInput').value = hex;
+}
+function pickColorHex(hex) {
+  if (/^#[0-9a-fA-F]{6}$/.test(hex))
+    document.getElementById('colorDot').style.background = hex;
+}
+
+/* =====================================================
+   SIZE PANEL
+===================================================== */
+function toggleSize(e) {
+  e.stopPropagation();
+  const pop = document.getElementById('sizePopup');
+  document.getElementById('colorPopup').classList.remove('open');
+  pop.classList.toggle('open');
+  if (pop.classList.contains('open')) positionPopup(pop, e.currentTarget);
+}
+function onSizeChange(val) {
+  const f = parseFloat(val);
+  document.getElementById('sizeLabel').textContent = f + ' pt';
+  const px = Math.max(3, Math.min(14, Math.sqrt(f) * 3.2));
+  const dot = document.getElementById('sizeDot');
+  dot.style.width  = px + 'px';
+  dot.style.height = px + 'px';
+}
+function setPreset(btn, val) {
+  document.querySelectorAll('.sp-preset').forEach(b => b.classList.remove('sel'));
+  btn.classList.add('sel');
+  document.getElementById('sizeSlider').value = val;
+  onSizeChange(val);
+}
+function positionPopup(pop, anchor) {
+  const bRect = anchor.getBoundingClientRect();
+  // Use fixed position relative to viewport, not canvas area
+  pop.style.top  = bRect.top + 'px';
+  pop.style.left = (bRect.right + 8) + 'px';
+}
+
+/* =====================================================
+   PROPS PANEL
+===================================================== */
+document.getElementById('propToggle').onclick = function() {
+  const p = document.getElementById('propsPanel');
+  p.classList.toggle('open');
+  this.classList.toggle('active');
+};
+function toggleSeg(btn) {
+  btn.closest('.pp-segmented').querySelectorAll('.pp-seg').forEach(b => b.classList.remove('sel'));
+  btn.classList.add('sel');
+}
+function toggleGridBtn(btn) {
+  btn.closest('.pp-grid-btns').querySelectorAll('.pp-grid-btn').forEach(b => b.classList.remove('sel'));
+  btn.classList.add('sel');
+}
+
+/* =====================================================
+   CONTEXT MENU
+===================================================== */
+document.getElementById('paper').addEventListener('contextmenu', function(e) {
+  e.preventDefault();
+  const m = document.getElementById('ctxMenu');
+  m.style.left = e.clientX + 'px';
+  m.style.top  = e.clientY + 'px';
+  m.classList.add('open');
+});
+function hideCtx() { document.getElementById('ctxMenu').classList.remove('open'); }
+
+/* =====================================================
+   CLOSE PANELS ON OUTSIDE CLICK
+===================================================== */
+document.addEventListener('click', () => {
+  document.getElementById('colorPopup').classList.remove('open');
+  document.getElementById('sizePopup').classList.remove('open');
+  document.getElementById('ctxMenu').classList.remove('open');
+});
+
+/* =====================================================
+   KEYBOARD SHORTCUTS
+===================================================== */
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT') return;
+  const toolBtns = document.querySelectorAll('.tool-rail .t-btn');
+  const map = { p:0, h:1, e:2, t:3, s:4 };
+  const k = e.key.toLowerCase();
+  if (!e.ctrlKey && !e.metaKey && map[k] !== undefined) {
+    toolBtns.forEach(b => b.classList.remove('sel'));
+    toolBtns[map[k]].classList.add('sel');
+    document.getElementById('sbTool').textContent = TOOLS[map[k]];
+  }
+  if ((e.ctrlKey || e.metaKey) && k === 's') { e.preventDefault(); showToast('已儲存'); }
+  if ((e.ctrlKey || e.metaKey) && k === 'z') { showToast('復原'); }
+  if ((e.ctrlKey || e.metaKey) && k === 'y') { showToast('重做'); }
+});
+
+/* =====================================================
+   TOAST
+===================================================== */
+let toastTimer;
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.opacity = '1';
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.style.opacity = '0'; }, 1800);
+}
+</script>
+</body>
+</html>

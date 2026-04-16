@@ -25,8 +25,6 @@ public:
     void onNewDocument();
     void onOpenDocument(const std::filesystem::path& path);
     void onSaveDocument();
-    void onExportPdf(const std::filesystem::path& path);
-    void onExportPng(const std::filesystem::path& path);
 
 private:
     void showError(const std::string& title, const std::string& message);

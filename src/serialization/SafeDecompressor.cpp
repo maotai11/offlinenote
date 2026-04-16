@@ -57,8 +57,13 @@ DecompressResult SafeDecompressor::decompress(const std::filesystem::path& path)
     strm.next_in = reinterpret_cast<Bytef*>(compressed.data());
 
     // Initialize inflate with gzip support (windowBits 32 = auto-detect gzip or zlib)
-    if (inflateInit2(&strm, 32 + 15) != Z_OK) {
-        result.errorMessage = "Failed to initialize decompressor";
+    int initRet = inflateInit2(&strm, 32 + 15);
+    if (initRet == Z_VERSION_ERROR) {
+        result.errorMessage = "zlib version mismatch";
+        return result;
+    }
+    if (initRet != Z_OK) {
+        result.errorMessage = "Failed to initialize decompressor (code " + std::to_string(initRet) + ")";
         return result;
     }
 
@@ -81,9 +86,18 @@ DecompressResult SafeDecompressor::decompress(const std::filesystem::path& path)
         strm.next_out = reinterpret_cast<Bytef*>(buf);
 
         ret = inflate(&strm, Z_NO_FLUSH);
-        if (ret == Z_STREAM_ERROR || ret == Z_DATA_ERROR || ret == Z_MEM_ERROR || ret == Z_BUF_ERROR) {
+        // Handle all error codes per zlib manual:
+        // Z_STREAM_ERROR: corrupted stream state
+        // Z_DATA_ERROR: input data corrupted or incomplete
+        // Z_MEM_ERROR: not enough memory
+        // Z_BUF_ERROR: no progress possible (empty input with no output)
+        // Z_NEED_DICT: preset dictionary required (we don't support dictionaries)
+        if (ret == Z_STREAM_ERROR || ret == Z_DATA_ERROR ||
+            ret == Z_MEM_ERROR || ret == Z_BUF_ERROR ||
+            ret == Z_NEED_DICT) {
             inflateEnd(&strm);
-            result.errorMessage = "Decompression error (code " + std::to_string(ret) + ")";
+            const char* reason = (ret == Z_NEED_DICT) ? "dictionary required (unsupported)" : "decompression error";
+            result.errorMessage = std::string(reason) + " (code " + std::to_string(ret) + ")";
             return result;
         }
 

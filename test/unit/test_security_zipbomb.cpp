@@ -1,17 +1,50 @@
 // test/unit/test_security_zipbomb.cpp
-// Real tests for zip bomb and decompression security
 #include "../catch_amalgamated.hpp"
 #include "../../src/serialization/SafeDecompressor.h"
 #include "../../src/util/SafeArithmetic.h"
 #include "../../src/import/PdfImporter.h"
+#include <filesystem>
 #include <fstream>
-#include <cstring>
+#include <string>
+#include <vector>
+#include <zlib.h>
 
-// NOTE: isValidPdfPageSize is static in PdfImporter.cpp, so we test it indirectly
-// by verifying the constants and SafeFloat functions that it depends on.
+namespace fs = std::filesystem;
+
+static std::vector<unsigned char> deflatePayload(const std::string& input,
+                                                 int windowBits,
+                                                 const Bytef* dictionary = nullptr,
+                                                 uInt dictionarySize = 0) {
+    z_stream stream = {};
+    REQUIRE(deflateInit2(&stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, windowBits, 8, Z_DEFAULT_STRATEGY) == Z_OK);
+
+    if (dictionary != nullptr && dictionarySize > 0) {
+        REQUIRE(deflateSetDictionary(&stream, dictionary, dictionarySize) == Z_OK);
+    }
+
+    stream.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(input.data()));
+    stream.avail_in = static_cast<uInt>(input.size());
+
+    std::vector<unsigned char> output;
+    unsigned char buffer[256];
+
+    int ret = Z_OK;
+    while (ret != Z_STREAM_END) {
+        stream.next_out = buffer;
+        stream.avail_out = sizeof(buffer);
+        ret = deflate(&stream, Z_FINISH);
+        REQUIRE(ret == Z_OK || ret == Z_STREAM_END);
+
+        const size_t produced = sizeof(buffer) - stream.avail_out;
+        output.insert(output.end(), buffer, buffer + produced);
+    }
+
+    REQUIRE(deflateEnd(&stream) == Z_OK);
+    return output;
+}
 
 TEST_CASE("SafeDecompressor rejects empty file", "[security][decompress]") {
-    const char* testPath = "test_empty.gz";
+    const fs::path testPath = fs::current_path() / "test_empty.gz";
     std::ofstream ofs(testPath, std::ios::binary);
     ofs.close();
 
@@ -20,7 +53,7 @@ TEST_CASE("SafeDecompressor rejects empty file", "[security][decompress]") {
 }
 
 TEST_CASE("SafeDecompressor rejects invalid data", "[security][decompress]") {
-    const char* testPath = "test_invalid.gz";
+    const fs::path testPath = fs::current_path() / "test_invalid.gz";
     std::ofstream ofs(testPath, std::ios::binary);
     const char garbage[] = "\xDE\xAD\xBE\xEF\x00\x01\x02\x03";
     ofs.write(garbage, sizeof(garbage) - 1);
@@ -31,40 +64,40 @@ TEST_CASE("SafeDecompressor rejects invalid data", "[security][decompress]") {
 }
 
 TEST_CASE("SafeDecompressor handles valid small gzip", "[security][decompress]") {
-    const char* testPath = "test_valid.gz";
+    const fs::path testPath = fs::current_path() / "test_valid.gz";
+    const auto gzipData = deflatePayload("Hello\n", 16 + MAX_WBITS);
+
     std::ofstream ofs(testPath, std::ios::binary);
-    // Minimal gzip for "Hello\n"
-    const unsigned char gzipHello[] = {
-        0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x03, 0xf3, 0x48, 0xcd, 0xc9, 0xc9, 0x07,
-        0x00, 0x86, 0xa6, 0x10, 0x36, 0x05, 0x00, 0x00,
-        0x00
-    };
-    ofs.write(reinterpret_cast<const char*>(gzipHello), sizeof(gzipHello));
+    ofs.write(reinterpret_cast<const char*>(gzipData.data()), static_cast<std::streamsize>(gzipData.size()));
     ofs.close();
 
     auto result = SafeDecompressor::decompress(testPath);
-    if (result.success) {
-        REQUIRE(result.data.size() > 0);
-        REQUIRE(result.data.size() < 10000000);
-    }
+    REQUIRE(result.success);
+    REQUIRE(std::string(result.data.begin(), result.data.end()) == "Hello\n");
 }
 
-TEST_CASE("PDF page dimension limits use SafeArithmetic constants", "[security][pdf]") {
-    // Verify the constants that PdfImporter::isValidPdfPageSize depends on
+TEST_CASE("SafeDecompressor rejects dictionary-compressed stream", "[security][decompress]") {
+    const fs::path testPath = fs::current_path() / "test_dict.z";
+    static const unsigned char dictionary[] = "common-prefix-for-dictionary";
+    const auto compressed = deflatePayload("common-prefix-for-dictionary + payload", MAX_WBITS, dictionary, sizeof(dictionary) - 1);
+
+    std::ofstream ofs(testPath, std::ios::binary);
+    ofs.write(reinterpret_cast<const char*>(compressed.data()), static_cast<std::streamsize>(compressed.size()));
+    ofs.close();
+
+    auto result = SafeDecompressor::decompress(testPath);
+    REQUIRE(!result.success);
+    REQUIRE(result.errorMessage.find("dictionary") != std::string::npos);
+}
+
+TEST_CASE("PdfImporter enforces import page size limits", "[security][pdf]") {
     REQUIRE(CAIRO_MAX_IMAGE_SURFACE_DIM == 32767.0);
     REQUIRE(MAX_PAGE_COORDINATE_PT == 5000.0);
 
-    // PdfImporter uses its own limits (MAX_PDF_PAGE_DIMENSION_PT = 7000.0)
-    // which are stricter than SafeFloat for PDF import.
-    // SafeFloat validates runtime coordinates, PdfImporter validates import coordinates.
-    // SafeFloat coordinates should reject excessive values
-    REQUIRE(SafeFloat::isValidPageCoordinate(3370.0));  // A0 max edge
-    REQUIRE(SafeFloat::isValidPageCoordinate(5000.0));  // MAX_PAGE_COORDINATE_PT
-    REQUIRE(SafeFloat::isValidPageCoordinate(-5000.0)); // Negative is valid
-    REQUIRE(!SafeFloat::isValidPageCoordinate(5001.0)); // Beyond limit
-    REQUIRE(!SafeFloat::isValidPageCoordinate(-5001.0)); // Beyond negative limit
-    REQUIRE(!SafeFloat::isValidPageCoordinate(std::nan("")));
+    REQUIRE(PdfImporter::isValidImportPageSize(3370.0, 2384.0));
+    REQUIRE(!PdfImporter::isValidImportPageSize(7001.0, 100.0));
+    REQUIRE(!PdfImporter::isValidImportPageSize(4000.0, 4000.0));
+    REQUIRE(!PdfImporter::isValidImportPageSize(std::nan(""), 100.0));
 }
 
 TEST_CASE("Color from hex string parsing", "[security][color]") {

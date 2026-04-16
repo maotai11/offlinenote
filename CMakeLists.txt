@@ -4,7 +4,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(OfflineNote
-    VERSION 4.0.2
+    VERSION 4.0.3
     DESCRIPTION "Offline-first handwriting and PDF annotation desktop application"
     HOMEPAGE_URL "https://github.com/maotai11/offlinenote"
     LANGUAGES CXX C
@@ -16,6 +16,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 include(CompilerFlags)
+include(CodeSigning)
 include(DependencyVersions)
 include(InstallDirs)
 
@@ -38,6 +39,7 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(GTK3 REQUIRED gtk+-3.0>=3.22)
 pkg_check_modules(CAIRO REQUIRED cairo>=1.14)
 pkg_check_modules(GLIB2 REQUIRED glib-2.0>=2.56)
+pkg_check_modules(GIO2 REQUIRED gio-2.0>=2.56)
 pkg_check_modules(GDK_PIXBUF REQUIRED gdk-pixbuf-2.0>=2.36)
 pkg_check_modules(LIBXML2 REQUIRED libxml-2.0>=2.9)
 pkg_check_modules(ZLIB REQUIRED zlib>=1.2)
@@ -59,59 +61,28 @@ target_sources(offlinenote_core_lib PRIVATE
     src/document/Page.cpp
     src/document/Layer.cpp
     src/document/Stroke.cpp
-    src/document/ImageElement.cpp
 
     # Serialization
     src/serialization/SecureXmlParser.cpp
     src/serialization/SafeDecompressor.cpp
     src/serialization/NoteSerializer.cpp
     src/serialization/NoteDeserializer.cpp
-    src/serialization/XmlHelper.cpp
-    src/serialization/MigrationManager.cpp
-
-    # Rendering
-    src/rendering/Renderer.cpp
-    src/rendering/StrokeRenderer.cpp
-    src/rendering/BackgroundRenderer.cpp
-    src/rendering/PdfPageRenderer.cpp
-    src/rendering/ImageRenderer.cpp
-    src/rendering/RenderCache.cpp
-
-    # Input
-    src/input/InputRouter.cpp
-    src/input/StylusHandler.cpp
-    src/input/GestureHandler.cpp
-    src/input/StrokeBuilder.cpp
-    src/input/Stabilizer.cpp
-    src/input/ToolState.cpp
-
-    # Tools
-    src/tools/ToolManager.cpp
-    src/tools/PenTool.cpp
-    src/tools/EraserTool.cpp
-    src/tools/SelectionTool.cpp
-
-    # Export
-    src/export/ExportManager.cpp
-    src/export/PdfExporter.cpp
-    src/export/PngExporter.cpp
 
     # Import
     src/import/PdfImporter.cpp
-    src/import/ImageImporter.cpp
 
     # Platform (無 GTK 依賴)
-    src/platform/FontManager.cpp
-    src/platform/ThemeManager.cpp
-    src/platform/CrashLogger.cpp
     src/platform/FileLock.cpp
     src/platform/AtomicRename.cpp
-    src/platform/PlatformWindows.cpp
 
     # Util
     src/util/Logger.cpp
     src/util/StringUtils.cpp
     src/util/FileUtils.cpp
+    src/util/CrashRecovery.cpp
+    src/util/LegacyNoteTextCodec.cpp
+    src/util/LegacyNoteResourceHelper.cpp
+    src/util/PdfImportPlan.cpp
     src/util/PathValidator.cpp
 )
 
@@ -122,6 +93,7 @@ target_include_directories(offlinenote_core_lib PUBLIC
 
 target_include_directories(offlinenote_core_lib PRIVATE
     ${GLIB2_INCLUDE_DIRS}
+    ${GIO2_INCLUDE_DIRS}
     ${LIBXML2_INCLUDE_DIRS}
     ${ZLIB_INCLUDE_DIRS}
     ${CAIRO_INCLUDE_DIRS}
@@ -131,6 +103,7 @@ target_include_directories(offlinenote_core_lib PRIVATE
 
 target_link_libraries(offlinenote_core_lib PRIVATE
     ${GLIB2_LIBRARIES}
+    ${GIO2_LIBRARIES}
     ${LIBXML2_LIBRARIES}
     ${ZLIB_LIBRARIES}
     ${CAIRO_LIBRARIES}
@@ -156,18 +129,12 @@ add_executable(offlinenote
     src/application/PathManager.cpp
     src/application/StartupCheck.cpp
 
+    # Platform bootstrap
+    src/platform/RuntimeBootstrap.cpp
+
     # UI
     src/ui/MainWindow.cpp
-    src/ui/MainToolbar.cpp
-    src/ui/PageCanvas.cpp
-    src/ui/MenuBar.cpp
-    src/ui/StatusBar.cpp
-    src/ui/dialogs/NewDocumentDialog.cpp
-    src/ui/dialogs/ExportDialog.cpp
     src/ui/dialogs/AboutDialog.cpp
-    src/ui/widgets/ColorButton.cpp
-    src/ui/widgets/PenSizeSlider.cpp
-    src/ui/widgets/ZoomController.cpp
 )
 
 target_include_directories(offlinenote PRIVATE
@@ -176,6 +143,7 @@ target_include_directories(offlinenote PRIVATE
     ${GTK3_INCLUDE_DIRS}
     ${CAIRO_INCLUDE_DIRS}
     ${GLIB2_INCLUDE_DIRS}
+    ${GIO2_INCLUDE_DIRS}
     ${GDK_PIXBUF_INCLUDE_DIRS}
     ${LIBXML2_INCLUDE_DIRS}
     ${ZLIB_INCLUDE_DIRS}
@@ -187,6 +155,7 @@ target_link_libraries(offlinenote PRIVATE
     ${GTK3_LIBRARIES}
     ${CAIRO_LIBRARIES}
     ${GLIB2_LIBRARIES}
+    ${GIO2_LIBRARIES}
     ${GDK_PIXBUF_LIBRARIES}
     ${LIBXML2_LIBRARIES}
     ${ZLIB_LIBRARIES}
@@ -198,9 +167,24 @@ if(WIN32)
     set_target_properties(offlinenote PROPERTIES WIN32_EXECUTABLE TRUE)
 endif()
 
+configure_windows_code_signing(offlinenote)
+configure_fake_success_stub_audit()
+
 # ──────────────────────────────────────────────
 # 測試
 # ──────────────────────────────────────────────
+install(TARGETS offlinenote
+    RUNTIME DESTINATION "${OFFLINENOTE_INSTALL_BIN_DIR}"
+)
+
+install(FILES
+    "${CMAKE_SOURCE_DIR}/LICENSE"
+    "${CMAKE_SOURCE_DIR}/README.md"
+    DESTINATION "${OFFLINENOTE_INSTALL_SHARE_DIR}/doc/offlinenote"
+)
+
+install_resources()
+
 if(OFFLINENOTE_BUILD_TESTS)
     enable_testing()
     add_library(catch2_vendored STATIC test/catch_amalgamated.cpp)

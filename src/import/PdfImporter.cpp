@@ -23,7 +23,7 @@ static constexpr double MAX_PDF_PAGE_DIMENSION_PT = 7000.0;
 // 渲染像素上限（px），對應 CAIRO_MAX_IMAGE_SURFACE_DIM
 static constexpr double MAX_RENDERED_PX = 16000.0; // 保守值，小於 Cairo 32767
 
-static bool isValidPdfPageSize(double width, double height) {
+bool PdfImporter::isValidImportPageSize(double width, double height) {
     if (!std::isfinite(width) || !std::isfinite(height)) return false;
     if (width <= 0.0 || height <= 0.0) return false;
     if (width > MAX_PDF_PAGE_DIMENSION_PT || height > MAX_PDF_PAGE_DIMENSION_PT) return false;
@@ -36,11 +36,6 @@ static bool isValidPdfPageSize(double width, double height) {
     double totalPixels = renderedW * renderedH;
     if (totalPixels > 256000000.0) return false;
     return true;
-}
-
-static double clampPageSize(double v) {
-    if (std::isnan(v) || v <= 0.0) return 0.0;
-    return std::min(v, MAX_PDF_PAGE_DIMENSION_PT);
 }
 
 struct PdfPageResult {
@@ -79,7 +74,7 @@ static PdfPageResult renderPdfPageToSurface(const std::string& pdfPath, int page
     poppler_page_get_size(page, &width, &height);
 
     // Security: validate page dimensions before rendering
-    if (!isValidPdfPageSize(width, height)) {
+    if (!PdfImporter::isValidImportPageSize(width, height)) {
         Logger::warning("PdfImporter: REJECTED page with excessive dimensions");
         g_object_unref(page);
         g_object_unref(doc);
@@ -132,7 +127,12 @@ std::vector<PdfImportedPage> PdfImporter::importPdf(const std::string& pdfPath, 
     if (!fs::exists(pdfPath)) return pages;
 
     // 確保輸出目錄存在
-    fs::create_directories(outDir);
+    std::error_code ec;
+    fs::create_directories(outDir, ec);
+    if (ec) {
+        Logger::warning("PdfImporter: FAILED to prepare output directory");
+        return pages;
+    }
 
     GError* err = nullptr;
     // Use GFile for proper Windows/Unicode path handling
@@ -158,7 +158,7 @@ std::vector<PdfImportedPage> PdfImporter::importPdf(const std::string& pdfPath, 
         poppler_page_get_size(page, &width, &height);
 
         // Security: validate page dimensions before rendering
-        if (!isValidPdfPageSize(width, height)) {
+        if (!PdfImporter::isValidImportPageSize(width, height)) {
             Logger::warning("PdfImporter: SKIPPING page with excessive dimensions");
             g_object_unref(page);
             continue;
@@ -195,6 +195,8 @@ std::vector<PdfImportedPage> PdfImporter::importPdf(const std::string& pdfPath, 
             pg.height = height;
             pg.pdfPageNum = i;
             pages.push_back(pg);
+        } else {
+            Logger::warning("PdfImporter: FAILED to render page PNG");
         }
 
         g_object_unref(page);

@@ -4,8 +4,13 @@
 #include "MainWindow.h"
 #include "../application/AppController.h"
 #include "../application/PathManager.h"
+#include "../util/CrashRecovery.h"
+#include "../util/LegacyNoteResourceHelper.h"
+#include "../util/LegacyNoteTextCodec.h"
 #include "../util/Logger.h"
 #include "../util/FileUtils.h"
+#include "../util/PathValidator.h"
+#include "../util/PdfImportPlan.h"
 
 #include <cairo-pdf.h>
 #include <gdk/gdkkeysyms.h>
@@ -152,6 +157,7 @@ static struct {
 
     // Crash recovery
     std::string crashRecoveryFile;
+    std::string crashRecoveryMarkerFile;
 
     AppController* ctrl = nullptr;
 } G;
@@ -175,38 +181,27 @@ static void deserializeNoteToCurrent(const std::string& data);
 static void on_undo(GtkButton*, gpointer);
 static void on_redo(GtkButton*, gpointer);
 static void pushUndo();
+static PageData* curPage();
 static FILE* wfopen_utf8(const std::string& path_utf8, const wchar_t* mode);
 static void hideTextEntry();
 static void on_note_rename(GtkMenuItem*, gpointer);
 static void on_note_delete(GtkMenuItem*, gpointer);
 static void on_save(GtkButton*, gpointer);
+static void updateStatus();
 static std::string get_save_dir();
 static std::string get_exe_dir();
+static fs::path utf8_to_path(const std::string& utf8);
 static std::string note_filename(NoteData* nd);
+static cairo_surface_t* load_image_surface(const char* filename);
 static bool save_note_to_file(NoteData* nd);
+static bool write_crash_recovery_snapshot(NoteData* nd);
+static void logInfo(const char* fmt, ...);
 
-// Path validation - prevent path traversal attacks
-static bool is_safe_path(const std::string& path) {
-    // Block absolute paths and path traversal
-    if (path.empty() || path[0] == '/' || path[0] == '\\') return false;
-    if (path.find("..") != std::string::npos) return false;
-    if (path.find(':') != std::string::npos) return false; // Block Windows drive letters
-    return true;
-}
-
-// Sanitize external file paths from .onote files
-static std::string sanitize_resource_path(const std::string& path) {
-    // If absolute path, extract just the filename
-    size_t pos = path.find_last_of("/\\");
-    std::string filename = (pos != std::string::npos) ? path.substr(pos + 1) : path;
-    // Remove dangerous characters
-    std::string safe;
-    for (char c : filename) {
-        if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|') continue;
-        safe += c;
-    }
-    return safe;
-}
+struct DirtySaveSummary {
+    int attempted = 0;
+    int saved = 0;
+    int failed = 0;
+};
 
 // ============================================================
 // Helpers
@@ -216,6 +211,248 @@ static NoteData* curNote() {
 }
 
 static std::string serializeCurrentNote() { return serializeNote(curNote()); }
+
+static fs::path crash_recovery_snapshot_path() {
+    return utf8_to_path(G.crashRecoveryFile);
+}
+
+static fs::path crash_recovery_marker_path() {
+    return utf8_to_path(G.crashRecoveryMarkerFile);
+}
+
+static NoteData* note_for_recovery_snapshot() {
+    if (NoteData* current = curNote(); current && current->dirty) {
+        return current;
+    }
+    for (auto& note : G.notes) {
+        if (note.dirty) {
+            return &note;
+        }
+    }
+    return curNote();
+}
+
+static bool write_session_marker() {
+    if (G.crashRecoveryMarkerFile.empty()) {
+        return false;
+    }
+
+    std::error_code ec;
+    const fs::path markerPath = crash_recovery_marker_path();
+    if (!markerPath.parent_path().empty()) {
+        fs::create_directories(markerPath.parent_path(), ec);
+        if (ec) {
+            logInfo("Failed to prepare crash recovery marker dir: %s", ec.message().c_str());
+            return false;
+        }
+    }
+
+    std::ofstream marker(markerPath, std::ios::trunc);
+    if (!marker) {
+        logInfo("Failed to create crash recovery session marker");
+        return false;
+    }
+    marker << "active\n";
+    return true;
+}
+
+static void remove_file_if_exists(const fs::path& path, const char* description) {
+    if (path.empty()) return;
+
+    std::error_code ec;
+    if (fs::exists(path, ec) && !ec) {
+        fs::remove(path, ec);
+        if (ec) {
+            logInfo("Failed to remove %s: %s", description, ec.message().c_str());
+        }
+    }
+}
+
+static void clear_crash_recovery_artifacts() {
+    remove_file_if_exists(crash_recovery_snapshot_path(), "crash recovery snapshot");
+    remove_file_if_exists(crash_recovery_marker_path(), "crash recovery session marker");
+}
+
+static DirtySaveSummary save_dirty_notes(const char* reason) {
+    DirtySaveSummary summary;
+    for (auto& note : G.notes) {
+        if (!note.dirty) {
+            continue;
+        }
+
+        summary.attempted++;
+        if (save_note_to_file(&note)) {
+            summary.saved++;
+            logInfo("%s succeeded: %s", reason, note.name.c_str());
+        } else {
+            summary.failed++;
+            logInfo("%s failed: %s", reason, note.name.c_str());
+        }
+    }
+    return summary;
+}
+
+static void show_shutdown_save_warning(const DirtySaveSummary& summary, bool snapshotSaved) {
+    char msg[512];
+    snprintf(msg, sizeof(msg),
+             "Some notes could not be saved before exit.\n\n"
+             "Saved: %d\nFailed: %d\n"
+             "Crash recovery snapshot: %s\n\n"
+             "The next launch will keep a recovery copy instead of pretending the shutdown completed cleanly.",
+             summary.saved, summary.failed, snapshotSaved ? "updated" : "failed");
+
+    GtkWidget* dlg = gtk_message_dialog_new(GTK_WINDOW(G.window), GTK_DIALOG_MODAL,
+        GTK_MESSAGE_WARNING, GTK_BUTTONS_OK, "%s", msg);
+    gtk_dialog_run(GTK_DIALOG(dlg));
+    gtk_widget_destroy(dlg);
+}
+
+static void persist_notes_for_shutdown() {
+    const DirtySaveSummary summary = save_dirty_notes("Shutdown save");
+    if (summary.failed == 0) {
+        clear_crash_recovery_artifacts();
+        return;
+    }
+
+    const bool snapshotSaved = write_crash_recovery_snapshot(note_for_recovery_snapshot());
+    show_shutdown_save_warning(summary, snapshotSaved);
+}
+
+static bool is_page_empty_for_pdf_import(const PageData& page) {
+    return page.strokes.empty() &&
+           page.images.empty() &&
+           page.texts.empty() &&
+           page.bgFile.empty() &&
+           page.bgSurf == nullptr;
+}
+
+static bool is_blank_note_for_pdf_import(const NoteData& note) {
+    return note.pages.size() == 1 && is_page_empty_for_pdf_import(note.pages.front());
+}
+
+static std::string pdf_import_note_name(const std::string& pdfPath) {
+    const std::string stem = utf8_to_path(pdfPath).stem().u8string();
+    return stem.empty() ? "Imported PDF" : stem;
+}
+
+static PdfImportPlan::FitRect fitted_background_rect(const PageData* pg,
+                                                     double containerWidth,
+                                                     double containerHeight) {
+    if (!pg) {
+        return {};
+    }
+
+    double bgWidth = pg->bgW;
+    double bgHeight = pg->bgH;
+    if ((bgWidth <= 0.0 || bgHeight <= 0.0) &&
+        pg->bgSurf &&
+        cairo_surface_status(pg->bgSurf) == CAIRO_STATUS_SUCCESS) {
+        bgWidth = cairo_image_surface_get_width(pg->bgSurf);
+        bgHeight = cairo_image_surface_get_height(pg->bgSurf);
+    }
+
+    return PdfImportPlan::fitContain(containerWidth, containerHeight, bgWidth, bgHeight);
+}
+
+static bool draw_page_background(cairo_t* cr,
+                                 const PageData* pg,
+                                 double containerX,
+                                 double containerY,
+                                 double containerWidth,
+                                 double containerHeight,
+                                 PdfImportPlan::FitRect* fittedRect = nullptr) {
+    if (!cr || !pg || !pg->bgSurf || cairo_surface_status(pg->bgSurf) != CAIRO_STATUS_SUCCESS) {
+        if (fittedRect) *fittedRect = {};
+        return false;
+    }
+
+    const PdfImportPlan::FitRect fit = fitted_background_rect(pg, containerWidth, containerHeight);
+    if (fittedRect) *fittedRect = fit;
+    if (!fit.valid) {
+        return false;
+    }
+
+    cairo_save(cr);
+    cairo_translate(cr, containerX + fit.offsetX, containerY + fit.offsetY);
+    cairo_scale(cr, fit.scale, fit.scale);
+    cairo_set_source_surface(cr, pg->bgSurf, 0, 0);
+    cairo_paint(cr);
+    cairo_restore(cr);
+    return true;
+}
+
+static void clamp_page_scroll(const PageData* pg) {
+    if (!pg || !G.drawingArea) {
+        G.pageScrollX = 0;
+        G.pageScrollY = 0;
+        return;
+    }
+
+    const int viewportWidth = gtk_widget_get_allocated_width(G.drawingArea);
+    const int viewportHeight = gtk_widget_get_allocated_height(G.drawingArea);
+    if (viewportWidth <= 0 || viewportHeight <= 0) {
+        return;
+    }
+
+    const double contentWidth = pg->pw * G.zoom + G.margins[0] + G.margins[2];
+    const double contentHeight = pg->ph * G.zoom + G.margins[1] + G.margins[3];
+    const double minScrollX = std::min(0.0, static_cast<double>(viewportWidth) - contentWidth);
+    const double minScrollY = std::min(0.0, static_cast<double>(viewportHeight) - contentHeight);
+
+    G.pageScrollX = std::min(0.0, std::max(minScrollX, G.pageScrollX));
+    G.pageScrollY = std::min(0.0, std::max(minScrollY, G.pageScrollY));
+}
+
+static void invalidate_canvas_and_refresh(bool refreshStatus = true) {
+    if (G.canvasSurf) {
+        cairo_surface_destroy(G.canvasSurf);
+        G.canvasSurf = nullptr;
+    }
+    renderCanvas();
+    if (refreshStatus) {
+        updateStatus();
+    }
+}
+
+static void apply_zoom_factor(double factor, double anchorX = -1.0, double anchorY = -1.0) {
+    PageData* pg = curPage();
+    if (!pg) {
+        return;
+    }
+
+    const double oldZoom = G.zoom;
+    const double newZoom = fmax(0.1, fmin(5.0, oldZoom * factor));
+    if (fabs(newZoom - oldZoom) < 1e-9) {
+        return;
+    }
+
+    if (!G.drawingArea) {
+        G.zoom = newZoom;
+        G.pageScrollX = 0;
+        G.pageScrollY = 0;
+        return;
+    }
+
+    const int viewportWidth = gtk_widget_get_allocated_width(G.drawingArea);
+    const int viewportHeight = gtk_widget_get_allocated_height(G.drawingArea);
+    if (viewportWidth <= 0 || viewportHeight <= 0) {
+        G.zoom = newZoom;
+        G.pageScrollX = 0;
+        G.pageScrollY = 0;
+        return;
+    }
+
+    if (anchorX < 0.0) anchorX = viewportWidth / 2.0;
+    if (anchorY < 0.0) anchorY = viewportHeight / 2.0;
+
+    const double docX = (anchorX - G.margins[0] - G.pageScrollX) / oldZoom;
+    const double docY = (anchorY - G.margins[1] - G.pageScrollY) / oldZoom;
+
+    G.zoom = newZoom;
+    G.pageScrollX = anchorX - G.margins[0] - docX * G.zoom;
+    G.pageScrollY = anchorY - G.margins[1] - docY * G.zoom;
+    clamp_page_scroll(pg);
+}
 
 static void pushUndo() {
     std::string snap = serializeCurrentNote();
@@ -288,60 +525,18 @@ static void updateWindowTitle() {
 // Auto-save callback (called every 30 seconds)
 static gboolean auto_save_callback(gpointer) {
     if (G.shuttingDown) return FALSE;
-    int saved = 0;
-    for (auto& n : G.notes) {
-        if (n.dirty) {
-            save_note_to_file(&n);
-            saved++;
-        }
+    const DirtySaveSummary summary = save_dirty_notes("Auto-save");
+    if (summary.saved > 0) {
+        logInfo("Auto-saved %d notes", summary.saved);
     }
-    if (saved > 0) {
-        logInfo("Auto-saved %d notes", saved);
-        // Save crash recovery snapshot in the SAME .onote format
-        NoteData* cur = curNote();
-        if (cur && !G.crashRecoveryFile.empty()) {
-            // Temporarily redirect save to crash recovery file
-            std::string origName = cur->name;
-            std::string origPath = note_filename(cur);
-            cur->name = "crash_recovery";
-            std::string crashFile = get_save_dir() + "/crash_recovery.onote";
-            FILE* f = wfopen_utf8(crashFile, L"wb");
-            if (f) {
-                fprintf(f, "# OfflineNote v1\n");
-                fprintf(f, "name=%s\n", cur->name.c_str());
-                fprintf(f, "pages=%zu\n", cur->pages.size());
-                for (size_t pi = 0; pi < cur->pages.size(); pi++) {
-                    PageData* pg = &cur->pages[pi];
-                    fprintf(f, "[page %zu]\n", pi);
-                    fprintf(f, "pw=%g\nph=%g\n", pg->pw, pg->ph);
-                    for (size_t si = 0; si < pg->strokes.size(); si++) {
-                        StrokeData* s = &pg->strokes[si];
-                        fprintf(f, "s %zu w=%g r=%g g=%g b=%g a=%g t=%d\n", si, s->w, s->r, s->g, s->b, s->a, s->tool);
-                        for (size_t pt = 0; pt < s->x.size(); pt++) {
-                            fprintf(f, "p %g %g\n", s->x[pt], s->y[pt]);
-                        }
-                    }
-                    for (size_t ti = 0; ti < pg->texts.size(); ti++) {
-                        TxtEl* t = &pg->texts[ti];
-                        std::string esc = t->text;
-                        for (auto& c : esc) { if (c == '\n') c = ' '; if (c == '|') c = '-'; }
-                        fprintf(f, "t %zu x=%g y=%g fs=%g r=%g g=%g b=%g txt=%s\n",
-                                ti, t->x, t->y, t->fontSize, t->r, t->g, t->b, esc.c_str());
-                    }
-                    for (size_t ii = 0; ii < pg->images.size(); ii++) {
-                        ImgEl* img = &pg->images[ii];
-                        if (!img->srcFile.empty()) {
-                            fprintf(f, "img %zu x=%g y=%g w=%g h=%g src=%s\n",
-                                    ii, img->x, img->y, img->w, img->h, img->srcFile.c_str());
-                        }
-                    }
-                    if (!pg->bgFile.empty()) {
-                        fprintf(f, "bg src=%s w=%g h=%g\n", pg->bgFile.c_str(), pg->bgW, pg->bgH);
-                    }
-                }
-                fclose(f);
-            }
-            cur->name = origName;
+    if (summary.failed > 0) {
+        logInfo("Auto-save failed for %d notes", summary.failed);
+    }
+    if (summary.attempted > 0) {
+        if (write_crash_recovery_snapshot(note_for_recovery_snapshot())) {
+            logInfo("Crash recovery snapshot updated");
+        } else {
+            logInfo("Crash recovery snapshot update failed");
         }
     }
     return TRUE; // keep running
@@ -577,6 +772,8 @@ static void renderCanvas() {
     int allocH = gtk_widget_get_allocated_height(G.drawingArea);
     if (allocW <= 0 || allocH <= 0) return;
 
+    clamp_page_scroll(pg);
+
     int pw = (int)(pg->pw * G.zoom), ph = (int)(pg->ph * G.zoom);
     int sw = pw + G.margins[0] + G.margins[2], sh = ph + G.margins[1] + G.margins[3];
 
@@ -614,13 +811,15 @@ static void renderCanvas() {
 
     // Background image
     if (pg->bgSurf && cairo_surface_status(pg->bgSurf)==CAIRO_STATUS_SUCCESS) {
-        double sc = fmin((double)pw/pg->bgW, (double)ph/pg->bgH);
-        double bw=pg->bgW*sc, bh=pg->bgH*sc;
-        double bx=leftMargin+(pw-bw)/2, by=topMargin+(ph-bh)/2;
-        cairo_set_source_surface(cr, pg->bgSurf, bx, by); cairo_paint(cr);
+        PdfImportPlan::FitRect fit;
+        draw_page_background(cr, pg, leftMargin, topMargin, pw, ph, &fit);
+        const double bx = leftMargin + fit.offsetX;
+        const double by = topMargin + fit.offsetY;
+        const double bw = fit.width;
+        const double bh = fit.height;
 
         // Selection indicator for background
-        if (G.selBg) {
+        if (G.selBg && fit.valid) {
             cairo_set_source_rgba(cr, 0.2, 0.5, 1, 0.7);
             cairo_set_line_width(cr, 2);
             cairo_set_dash(cr, (double[]){6, 3}, 2, 0);
@@ -954,19 +1153,21 @@ static gboolean on_btnpress(GtkWidget*, GdkEventButton* ev, gpointer) {
 
         // Clicked on empty space - check if background exists
         if (pg->bgSurf && cairo_surface_status(pg->bgSurf) == CAIRO_STATUS_SUCCESS) {
-            double bw = pg->bgW, bh = pg->bgH;
-            double sc = fmin(pg->pw/bw, pg->ph/bh);
-            double dispW = bw * sc, dispH = bh * sc;
-            double bx = (pg->pw - dispW) / 2, by = (pg->ph - dispH) / 2;
+            const PdfImportPlan::FitRect fit = fitted_background_rect(pg, pg->pw, pg->ph);
+            const double dispW = fit.width;
+            const double dispH = fit.height;
+            const double bx = fit.offsetX;
+            const double by = fit.offsetY;
 
-            if (px >= bx && px <= bx+dispW && py >= by && py <= by+dispH) {
+            if (fit.valid && px >= bx && px <= bx+dispW && py >= by && py <= by+dispH) {
                 G.selBg = 1;
                 // Check resize handle (bottom-right corner, 20px)
                 if (px >= bx+dispW-20/G.zoom && px <= bx+dispW && py >= by+dispH-20/G.zoom && py <= by+dispH) {
                     G.resizing = 1;
                     G.dragOffX = px; G.dragOffY = py;
                     G.selResizeW = dispW; G.selResizeH = dispH;
-                    G.selResizeOrigW = bw; G.selResizeOrigH = bh;
+                    G.selResizeOrigW = pg->bgW > 0.0 ? pg->bgW : dispW;
+                    G.selResizeOrigH = pg->bgH > 0.0 ? pg->bgH : dispH;
                 }
                 renderCanvas(); updateStatus(); updatePropPanel();
                 return TRUE;
@@ -1143,60 +1344,56 @@ static gboolean on_scroll(GtkWidget*, GdkEventScroll* ev, gpointer) {
         double f = 1.0;
         if (ev->direction == GDK_SCROLL_UP || (ev->direction == GDK_SCROLL_SMOOTH && ev->delta_y < 0)) f = 1.1;
         else if (ev->direction == GDK_SCROLL_DOWN || (ev->direction == GDK_SCROLL_SMOOTH && ev->delta_y > 0)) f = 0.9;
-        G.zoom = fmax(0.1, fmin(5.0, G.zoom * f));
-        G.pageScrollY = 0; G.pageScrollX = 0;
-        if (G.canvasSurf) { cairo_surface_destroy(G.canvasSurf); G.canvasSurf = nullptr; }
-        renderCanvas(); updateStatus();
+        apply_zoom_factor(f, ev->x, ev->y);
+        invalidate_canvas_and_refresh();
         return TRUE;
     }
+
+    const double scrollAmt = 40.0;
+    bool changed = false;
 
     // Shift+scroll = horizontal pan
     bool shiftHeld = (ev->state & GDK_SHIFT_MASK) != 0;
-    if (shiftHeld && G.zoom > 0.5) {
-        double scrollAmt = 30.0;
+    if (shiftHeld) {
         if (ev->direction == GDK_SCROLL_LEFT || (ev->direction == GDK_SCROLL_SMOOTH && ev->delta_x < 0)) {
             G.pageScrollX = fmin(0.0, G.pageScrollX + scrollAmt);
+            changed = true;
         } else if (ev->direction == GDK_SCROLL_RIGHT || (ev->direction == GDK_SCROLL_SMOOTH && ev->delta_x > 0)) {
-            double maxScroll = -(pg->pw * G.zoom - 800);
-            if (maxScroll < 0) G.pageScrollX = fmax(maxScroll, G.pageScrollX - scrollAmt);
+            G.pageScrollX -= scrollAmt;
+            changed = true;
         } else if (ev->direction == GDK_SCROLL_UP || (ev->direction == GDK_SCROLL_SMOOTH && ev->delta_y < 0)) {
             G.pageScrollX = fmin(0.0, G.pageScrollX + scrollAmt);
+            changed = true;
         } else if (ev->direction == GDK_SCROLL_DOWN || (ev->direction == GDK_SCROLL_SMOOTH && ev->delta_y > 0)) {
-            double maxScroll = -(pg->pw * G.zoom - 800);
-            if (maxScroll < 0) G.pageScrollX = fmax(maxScroll, G.pageScrollX - scrollAmt);
+            G.pageScrollX -= scrollAmt;
+            changed = true;
         }
-        if (G.canvasSurf) { cairo_surface_destroy(G.canvasSurf); G.canvasSurf = nullptr; }
-        renderCanvas();
+        clamp_page_scroll(pg);
+        if (changed) {
+            invalidate_canvas_and_refresh(false);
+        }
         return TRUE;
     }
 
-    // Normal scroll = vertical pan when zoomed
-    if (G.zoom > 0.5) {
-        double scrollAmt = 30.0;
-        if (ev->direction == GDK_SCROLL_UP || (ev->direction == GDK_SCROLL_SMOOTH && ev->delta_y < 0)) {
-            G.pageScrollY = fmin(0.0, G.pageScrollY + scrollAmt);
-        } else if (ev->direction == GDK_SCROLL_DOWN || (ev->direction == GDK_SCROLL_SMOOTH && ev->delta_y > 0)) {
-            double maxScroll = -(pg->ph * G.zoom - 600);
-            if (maxScroll < 0) G.pageScrollY = fmax(maxScroll, G.pageScrollY - scrollAmt);
-        } else if (ev->direction == GDK_SCROLL_LEFT || (ev->direction == GDK_SCROLL_SMOOTH && ev->delta_x < 0)) {
-            G.pageScrollX = fmin(0.0, G.pageScrollX + scrollAmt);
-        } else if (ev->direction == GDK_SCROLL_RIGHT || (ev->direction == GDK_SCROLL_SMOOTH && ev->delta_x > 0)) {
-            double maxScroll = -(pg->pw * G.zoom - 800);
-            if (maxScroll < 0) G.pageScrollX = fmax(maxScroll, G.pageScrollX - scrollAmt);
-        }
-        if (G.canvasSurf) { cairo_surface_destroy(G.canvasSurf); G.canvasSurf = nullptr; }
-        renderCanvas();
-        return TRUE;
+    // Normal scroll = pan. Zoom should only happen with Ctrl.
+    if (ev->direction == GDK_SCROLL_UP || (ev->direction == GDK_SCROLL_SMOOTH && ev->delta_y < 0)) {
+        G.pageScrollY = fmin(0.0, G.pageScrollY + scrollAmt);
+        changed = true;
+    } else if (ev->direction == GDK_SCROLL_DOWN || (ev->direction == GDK_SCROLL_SMOOTH && ev->delta_y > 0)) {
+        G.pageScrollY -= scrollAmt;
+        changed = true;
+    } else if (ev->direction == GDK_SCROLL_LEFT || (ev->direction == GDK_SCROLL_SMOOTH && ev->delta_x < 0)) {
+        G.pageScrollX = fmin(0.0, G.pageScrollX + scrollAmt);
+        changed = true;
+    } else if (ev->direction == GDK_SCROLL_RIGHT || (ev->direction == GDK_SCROLL_SMOOTH && ev->delta_x > 0)) {
+        G.pageScrollX -= scrollAmt;
+        changed = true;
     }
 
-    // Not zoomed - default zoom behavior
-    double f = 1.0;
-    if (ev->direction == GDK_SCROLL_UP || (ev->direction == GDK_SCROLL_SMOOTH && ev->delta_y < 0)) f = 1.1;
-    else if (ev->direction == GDK_SCROLL_DOWN || (ev->direction == GDK_SCROLL_SMOOTH && ev->delta_y > 0)) f = 0.9;
-    G.zoom = fmax(0.1, fmin(5.0, G.zoom * f));
-    G.pageScrollY = 0; G.pageScrollX = 0;
-    if (G.canvasSurf) { cairo_surface_destroy(G.canvasSurf); G.canvasSurf = nullptr; }
-    renderCanvas(); updateStatus();
+    clamp_page_scroll(pg);
+    if (changed) {
+        invalidate_canvas_and_refresh(false);
+    }
     return TRUE;
 }
 
@@ -1403,23 +1600,28 @@ static void on_color(GtkButton*, gpointer) {
 static void on_pensize(GtkRange* r, gpointer) { G.penW = gtk_range_get_value(r); }
 
 static void on_zoomin(GtkButton*, gpointer) {
-    G.zoom=fmin(5.0, G.zoom*1.25);
-    if(G.canvasSurf){cairo_surface_destroy(G.canvasSurf);G.canvasSurf=nullptr;}
-    renderCanvas(); updateStatus();
+    apply_zoom_factor(1.25);
+    invalidate_canvas_and_refresh();
 }
 static void on_zoomout(GtkButton*, gpointer) {
-    G.zoom=fmax(0.1, G.zoom/1.25);
-    if(G.canvasSurf){cairo_surface_destroy(G.canvasSurf);G.canvasSurf=nullptr;}
-    renderCanvas(); updateStatus();
+    apply_zoom_factor(1.0 / 1.25);
+    invalidate_canvas_and_refresh();
 }
 static void on_zoomfit(GtkButton*, gpointer) {
     PageData* pg=curPage(); if(!pg||!G.drawingArea) return;
     int aw=gtk_widget_get_allocated_width(G.drawingArea);
     int ah=gtk_widget_get_allocated_height(G.drawingArea);
-    G.zoom=fmin((double)(aw-G.margins[0]-G.margins[2]-10)/pg->pw, (double)(ah-G.margins[1]-G.margins[3]-10)/pg->ph);
-    G.zoom=fmax(0.1,fmin(5.0,G.zoom));
-    if(G.canvasSurf){cairo_surface_destroy(G.canvasSurf);G.canvasSurf=nullptr;}
-    renderCanvas(); updateStatus();
+    const PdfImportPlan::FitRect fit = PdfImportPlan::fitContain(
+        aw - G.margins[0] - G.margins[2] - 10.0,
+        ah - G.margins[1] - G.margins[3] - 10.0,
+        pg->pw,
+        pg->ph);
+    if (!fit.valid) return;
+    G.zoom=fmax(0.1,fmin(5.0,fit.scale));
+    G.pageScrollX = 0;
+    G.pageScrollY = 0;
+    clamp_page_scroll(pg);
+    invalidate_canvas_and_refresh();
 }
 static void on_undo(GtkButton*, gpointer) {
     NoteData* n = curNote();
@@ -1981,6 +2183,10 @@ static std::wstring utf8_to_wide(const std::string& utf8) {
     return result;
 }
 
+static fs::path utf8_to_path(const std::string& utf8) {
+    return fs::path(utf8_to_wide(utf8));
+}
+
 // Helper: Open file with wide string path, returns FILE* or nullptr
 static FILE* wfopen_utf8(const std::string& path_utf8, const wchar_t* mode) {
     std::wstring wpath = utf8_to_wide(path_utf8);
@@ -2067,8 +2273,7 @@ static std::string serializeNote(const NoteData* nd) {
 
         for (size_t ti = 0; ti < pg->texts.size(); ti++) {
             const TxtEl* t = &pg->texts[ti];
-            std::string esc = t->text;
-            for (auto& c : esc) { if (c == '\n') c = ' '; if (c == '|') c = '-'; }
+            std::string esc = LegacyNoteTextCodec::encode(t->text);
             snprintf(buf, sizeof(buf), "t %zu x=%g y=%g fs=%g r=%g g=%g b=%g txt=%s\n", ti, t->x, t->y, t->fontSize, t->r, t->g, t->b, esc.c_str());
             out += buf;
         }
@@ -2123,14 +2328,14 @@ static void deserializeNoteToCurrent(const std::string& data) {
             if (line.substr(0, 2) == "s ") {
                 pg->strokes.push_back(StrokeData());
                 curStroke = &pg->strokes.back();
-                char* str = (char*)line.c_str();
-                char* tok;
-                tok = strstr((const char*)str, "w="); if(tok) curStroke->w = atof(tok+2);
-                tok = strstr((const char*)str, "r="); if(tok) curStroke->r = atof(tok+2);
-                tok = strstr((const char*)str, "g="); if(tok) curStroke->g = atof(tok+2);
-                tok = strstr((const char*)str, "b="); if(tok) curStroke->b = atof(tok+2);
-                tok = strstr((const char*)str, "a="); if(tok) curStroke->a = atof(tok+2);
-                tok = strstr((const char*)str, "t="); if(tok) curStroke->tool = atoi(tok+2);
+                const char* str = line.c_str();
+                const char* tok;
+                tok = strstr(str, "w="); if(tok) curStroke->w = atof(tok+2);
+                tok = strstr(str, "r="); if(tok) curStroke->r = atof(tok+2);
+                tok = strstr(str, "g="); if(tok) curStroke->g = atof(tok+2);
+                tok = strstr(str, "b="); if(tok) curStroke->b = atof(tok+2);
+                tok = strstr(str, "a="); if(tok) curStroke->a = atof(tok+2);
+                tok = strstr(str, "t="); if(tok) curStroke->tool = atoi(tok+2);
                 continue;
             }
 
@@ -2144,35 +2349,35 @@ static void deserializeNoteToCurrent(const std::string& data) {
             if (line.substr(0, 2) == "t ") {
                 pg->texts.push_back(TxtEl());
                 TxtEl* t = &pg->texts.back();
-                char* tok;
-                tok = strstr((char*)line.c_str(), "x="); if(tok) t->x = atof(tok+2);
-                tok = strstr((char*)line.c_str(), "y="); if(tok) t->y = atof(tok+2);
-                tok = strstr((char*)line.c_str(), "fs="); if(tok) t->fontSize = atof(tok+3);
-                tok = strstr((char*)line.c_str(), "r="); if(tok) t->r = atof(tok+2);
-                tok = strstr((char*)line.c_str(), "g="); if(tok) t->g = atof(tok+2);
-                tok = strstr((char*)line.c_str(), "b="); if(tok) t->b = atof(tok+2);
-                tok = strstr((char*)line.c_str(), "txt="); if(tok) t->text = tok+4;
+                const char* tok;
+                tok = strstr(line.c_str(), "x="); if(tok) t->x = atof(tok+2);
+                tok = strstr(line.c_str(), "y="); if(tok) t->y = atof(tok+2);
+                tok = strstr(line.c_str(), "fs="); if(tok) t->fontSize = atof(tok+3);
+                tok = strstr(line.c_str(), "r="); if(tok) t->r = atof(tok+2);
+                tok = strstr(line.c_str(), "g="); if(tok) t->g = atof(tok+2);
+                tok = strstr(line.c_str(), "b="); if(tok) t->b = atof(tok+2);
+                tok = strstr(line.c_str(), "txt="); if(tok) t->text = LegacyNoteTextCodec::decode(tok+4);
                 continue;
             }
 
             if (line.substr(0, 4) == "img ") {
                 pg->images.push_back(ImgEl());
                 ImgEl* img = &pg->images.back();
-                char* tok;
-                tok = strstr((char*)line.c_str(), "x="); if(tok) img->x = atof(tok+2);
-                tok = strstr((char*)line.c_str(), "y="); if(tok) img->y = atof(tok+2);
-                tok = strstr((char*)line.c_str(), "w="); if(tok) img->w = atof(tok+2);
-                tok = strstr((char*)line.c_str(), "h="); if(tok) img->h = atof(tok+2);
-                tok = strstr((char*)line.c_str(), "src="); if(tok) img->srcFile = tok+4;
+                const char* tok;
+                tok = strstr(line.c_str(), "x="); if(tok) img->x = atof(tok+2);
+                tok = strstr(line.c_str(), "y="); if(tok) img->y = atof(tok+2);
+                tok = strstr(line.c_str(), "w="); if(tok) img->w = atof(tok+2);
+                tok = strstr(line.c_str(), "h="); if(tok) img->h = atof(tok+2);
+                tok = strstr(line.c_str(), "src="); if(tok) img->srcFile = tok+4;
                 continue;
             }
 
             if (line.substr(0, 3) == "bg ") {
-                char* tok = strstr((char*)line.c_str(), "src=");
+                const char* tok = strstr(line.c_str(), "src=");
                 if (tok) {
                     pg->bgFile = tok + 4;
-                    tok = strstr((char*)line.c_str(), "w="); if(tok) pg->bgW = atof(tok+2);
-                    tok = strstr((char*)line.c_str(), "h="); if(tok) pg->bgH = atof(tok+2);
+                    tok = strstr(line.c_str(), "w="); if(tok) pg->bgW = atof(tok+2);
+                    tok = strstr(line.c_str(), "h="); if(tok) pg->bgH = atof(tok+2);
                 }
                 continue;
             }
@@ -2217,6 +2422,7 @@ static void deserializeNoteToCurrent(const std::string& data) {
 
 static bool save_note_to_file(NoteData* nd) {
     std::string fn_utf8 = note_filename(nd);
+    const fs::path notePath = utf8_to_path(fn_utf8);
     FILE* f = wfopen_utf8(fn_utf8, L"wb");
     if (!f) {
         logInfo("儲存失敗: 無法建立 %s", fn_utf8.c_str());
@@ -2246,8 +2452,7 @@ static bool save_note_to_file(NoteData* nd) {
         // Save texts
         for (size_t ti = 0; ti < pg->texts.size(); ti++) {
             TxtEl* t = &pg->texts[ti];
-            std::string escaped = t->text;
-            for (auto& c : escaped) { if (c == '\n') c = ' '; if (c == '|') c = '-'; }
+            std::string escaped = LegacyNoteTextCodec::encode(t->text);
             fprintf(f, "t %zu x=%g y=%g fs=%g r=%g g=%g b=%g txt=%s\n",
                     ti, t->x, t->y, t->fontSize, t->r, t->g, t->b, escaped.c_str());
         }
@@ -2256,17 +2461,24 @@ static bool save_note_to_file(NoteData* nd) {
         for (size_t ii = 0; ii < pg->images.size(); ii++) {
             ImgEl* img = &pg->images[ii];
             if (!img->srcFile.empty()) {
-                // Sanitize path - only store filename, not full path
-                std::string safePath = sanitize_resource_path(img->srcFile);
-                fprintf(f, "img %zu x=%g y=%g w=%g h=%g src=%s\n",
-                        ii, img->x, img->y, img->w, img->h, safePath.c_str());
+                const std::string storedPath = LegacyNoteResourceHelper::stageForNote(
+                    notePath, utf8_to_path(img->srcFile), notePath);
+                if (!storedPath.empty()) {
+                    img->srcFile = storedPath;
+                    fprintf(f, "img %zu x=%g y=%g w=%g h=%g src=%s\n",
+                            ii, img->x, img->y, img->w, img->h, storedPath.c_str());
+                }
             }
         }
 
         // Save background source
         if (!pg->bgFile.empty()) {
-            std::string safePath = sanitize_resource_path(pg->bgFile);
-            fprintf(f, "bg src=%s w=%g h=%g\n", safePath.c_str(), pg->bgW, pg->bgH);
+            const std::string storedPath = LegacyNoteResourceHelper::stageForNote(
+                notePath, utf8_to_path(pg->bgFile), notePath);
+            if (!storedPath.empty()) {
+                pg->bgFile = storedPath;
+                fprintf(f, "bg src=%s w=%g h=%g\n", storedPath.c_str(), pg->bgW, pg->bgH);
+            }
         }
     }
 
@@ -2275,7 +2487,54 @@ static bool save_note_to_file(NoteData* nd) {
     return true;
 }
 
+static bool write_crash_recovery_snapshot(NoteData* nd) {
+    if (!nd || G.crashRecoveryFile.empty()) {
+        return false;
+    }
+
+    FILE* f = wfopen_utf8(G.crashRecoveryFile, L"wb");
+    if (!f) {
+        return false;
+    }
+
+    fprintf(f, "# OfflineNote v1\n");
+    fprintf(f, "name=%s\n", nd->name.c_str());
+    fprintf(f, "pages=%zu\n", nd->pages.size());
+    for (size_t pi = 0; pi < nd->pages.size(); pi++) {
+        PageData* pg = &nd->pages[pi];
+        fprintf(f, "[page %zu]\n", pi);
+        fprintf(f, "pw=%g\nph=%g\n", pg->pw, pg->ph);
+        for (size_t si = 0; si < pg->strokes.size(); si++) {
+            StrokeData* s = &pg->strokes[si];
+            fprintf(f, "s %zu w=%g r=%g g=%g b=%g a=%g t=%d\n", si, s->w, s->r, s->g, s->b, s->a, s->tool);
+            for (size_t pt = 0; pt < s->x.size(); pt++) {
+                fprintf(f, "p %g %g\n", s->x[pt], s->y[pt]);
+            }
+        }
+        for (size_t ti = 0; ti < pg->texts.size(); ti++) {
+            TxtEl* t = &pg->texts[ti];
+            std::string escaped = LegacyNoteTextCodec::encode(t->text);
+            fprintf(f, "t %zu x=%g y=%g fs=%g r=%g g=%g b=%g txt=%s\n",
+                    ti, t->x, t->y, t->fontSize, t->r, t->g, t->b, escaped.c_str());
+        }
+        for (size_t ii = 0; ii < pg->images.size(); ii++) {
+            ImgEl* img = &pg->images[ii];
+            if (!img->srcFile.empty()) {
+                fprintf(f, "img %zu x=%g y=%g w=%g h=%g src=%s\n",
+                        ii, img->x, img->y, img->w, img->h, img->srcFile.c_str());
+            }
+        }
+        if (!pg->bgFile.empty()) {
+            fprintf(f, "bg src=%s w=%g h=%g\n", pg->bgFile.c_str(), pg->bgW, pg->bgH);
+        }
+    }
+
+    fclose(f);
+    return true;
+}
+
 static bool load_note_from_file(const std::string& fn_utf8, NoteData* nd) {
+    const fs::path notePath = utf8_to_path(fn_utf8);
     // Use _wfopen for wide path support (Chinese characters)
     FILE* f = wfopen_utf8(fn_utf8, L"rb");
     if (!f) return false;
@@ -2322,14 +2581,14 @@ static bool load_note_from_file(const std::string& fn_utf8, NoteData* nd) {
                 pg->strokes.push_back(StrokeData());
                 curStroke = &pg->strokes.back();
                 // Parse params
-                char* str = (char*)sline.c_str();
-                char* tok;
-                tok = strstr((const char*)str, "w="); if(tok) curStroke->w = atof(tok+2);
-                tok = strstr((const char*)str, "r="); if(tok) curStroke->r = atof(tok+2);
-                tok = strstr((const char*)str, "g="); if(tok) curStroke->g = atof(tok+2);
-                tok = strstr((const char*)str, "b="); if(tok) curStroke->b = atof(tok+2);
-                tok = strstr((const char*)str, "a="); if(tok) curStroke->a = atof(tok+2);
-                tok = strstr((const char*)str, "t="); if(tok) curStroke->tool = atoi(tok+2);
+                const char* str = sline.c_str();
+                const char* tok;
+                tok = strstr(str, "w="); if(tok) curStroke->w = atof(tok+2);
+                tok = strstr(str, "r="); if(tok) curStroke->r = atof(tok+2);
+                tok = strstr(str, "g="); if(tok) curStroke->g = atof(tok+2);
+                tok = strstr(str, "b="); if(tok) curStroke->b = atof(tok+2);
+                tok = strstr(str, "a="); if(tok) curStroke->a = atof(tok+2);
+                tok = strstr(str, "t="); if(tok) curStroke->tool = atoi(tok+2);
                 continue;
             }
 
@@ -2351,7 +2610,7 @@ static bool load_note_from_file(const std::string& fn_utf8, NoteData* nd) {
                 tok = strstr((const char*)sline.c_str(), "r="); if(tok) t->r = atof(tok+2);
                 tok = strstr((const char*)sline.c_str(), "g="); if(tok) t->g = atof(tok+2);
                 tok = strstr((const char*)sline.c_str(), "b="); if(tok) t->b = atof(tok+2);
-                tok = strstr((const char*)sline.c_str(), "txt="); if(tok) t->text = tok+4;
+                tok = strstr((const char*)sline.c_str(), "txt="); if(tok) t->text = LegacyNoteTextCodec::decode(tok+4);
                 continue;
             }
 
@@ -2363,27 +2622,14 @@ static bool load_note_from_file(const std::string& fn_utf8, NoteData* nd) {
                 tok = strstr((const char*)sline.c_str(), "y="); if(tok) img->y = atof(tok+2);
                 tok = strstr((const char*)sline.c_str(), "w="); if(tok) img->w = atof(tok+2);
                 tok = strstr((const char*)sline.c_str(), "h="); if(tok) img->h = atof(tok+2);
-                tok = strstr((const char*)sline.c_str(), "src="); if(tok) img->srcFile = tok+4;
-
-                // Resolve path relative to note directory and validate
-                std::string imgPath = img->srcFile;
-                if (!is_safe_path(imgPath)) {
-                    // Path traversal detected - sanitize
-                    imgPath = sanitize_resource_path(imgPath);
-                    img->srcFile = imgPath;
-                }
-                // Try relative to note directory first
-                std::string saveDir = get_save_dir();
-                std::string fullPath = saveDir + "/" + imgPath;
-                if (!fs::exists(fullPath)) {
-                    // Try original path
-                    fullPath = imgPath;
-                }
+                tok = strstr((const char*)sline.c_str(), "src=");
+                if(tok) img->srcFile = LegacyNoteResourceHelper::sanitizeStoredPath(tok+4);
 
                 // Reload image if file exists
-                if (!imgPath.empty() && fs::exists(fullPath)) {
+                const fs::path fullPath = LegacyNoteResourceHelper::resolveForNote(notePath, img->srcFile);
+                if (!img->srcFile.empty() && !fullPath.empty() && fs::exists(fullPath)) {
                     GError* err = nullptr;
-                    GdkPixbuf* pb = gdk_pixbuf_new_from_file(fullPath.c_str(), &err);
+                    GdkPixbuf* pb = gdk_pixbuf_new_from_file(fullPath.u8string().c_str(), &err);
                     if (pb) {
                         int w = gdk_pixbuf_get_width(pb), h = gdk_pixbuf_get_height(pb);
                         cairo_surface_t* surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
@@ -2403,26 +2649,15 @@ static bool load_note_from_file(const std::string& fn_utf8, NoteData* nd) {
             if (sline.substr(0, 3) == "bg ") {
                 char* tok = strstr((const char*)sline.c_str(), "src=");
                 if (tok) {
-                    pg->bgFile = tok + 4;
+                    pg->bgFile = LegacyNoteResourceHelper::sanitizeStoredPath(tok + 4);
                     tok = strstr((const char*)sline.c_str(), "w="); if(tok) pg->bgW = atof(tok+2);
                     tok = strstr((const char*)sline.c_str(), "h="); if(tok) pg->bgH = atof(tok+2);
 
-                    // Validate and resolve background path
-                    std::string bgPath = pg->bgFile;
-                    if (!is_safe_path(bgPath)) {
-                        bgPath = sanitize_resource_path(bgPath);
-                        pg->bgFile = bgPath;
-                    }
-                    std::string saveDir = get_save_dir();
-                    std::string fullPath = saveDir + "/" + bgPath;
-                    if (!fs::exists(fullPath)) {
-                        fullPath = bgPath;
-                    }
-
                     // Reload background
-                    if (!bgPath.empty() && fs::exists(fullPath)) {
+                    const fs::path fullPath = LegacyNoteResourceHelper::resolveForNote(notePath, pg->bgFile);
+                    if (!pg->bgFile.empty() && !fullPath.empty() && fs::exists(fullPath)) {
                         GError* err = nullptr;
-                        GdkPixbuf* pb = gdk_pixbuf_new_from_file(fullPath.c_str(), &err);
+                        GdkPixbuf* pb = gdk_pixbuf_new_from_file(fullPath.u8string().c_str(), &err);
                         if (pb) {
                             int w = gdk_pixbuf_get_width(pb), h = gdk_pixbuf_get_height(pb);
                             cairo_surface_t* surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
@@ -2940,6 +3175,8 @@ static void on_export_note(GtkButton*, gpointer) {
             // Write directly using FILE* for wide path support
             FILE* f = wfopen_utf8(target, L"wb");
             if (f) {
+                const fs::path targetNotePath = utf8_to_path(target);
+                const fs::path sourceNotePath = utf8_to_path(note_filename(n));
                 fprintf(f, "# OfflineNote v1\nname=%s\npages=%zu\n", n->name.c_str(), n->pages.size());
                 for (size_t pi = 0; pi < n->pages.size(); pi++) {
                     PageData* pg = &n->pages[pi];
@@ -2951,18 +3188,27 @@ static void on_export_note(GtkButton*, gpointer) {
                             fprintf(f, "p %g %g\n", s.x[j], s.y[j]);
                     }
                     for (auto& t : pg->texts) {
-                        std::string esc = t.text;
-                        for (auto& c : esc) { if (c == '\n') c = ' '; if (c == '|') c = '-'; }
+                        std::string esc = LegacyNoteTextCodec::encode(t.text);
                         fprintf(f, "t 0 x=%g y=%g fs=%g r=%g g=%g b=%g txt=%s\n",
                                 t.x, t.y, t.fontSize, t.r, t.g, t.b, esc.c_str());
                     }
                     for (auto& img : pg->images) {
-                        if (!img.srcFile.empty())
-                            fprintf(f, "img 0 x=%g y=%g w=%g h=%g src=%s\n",
-                                    img.x, img.y, img.w, img.h, img.srcFile.c_str());
+                        if (!img.srcFile.empty()) {
+                            const std::string storedPath = LegacyNoteResourceHelper::stageForNote(
+                                targetNotePath, utf8_to_path(img.srcFile), sourceNotePath);
+                            if (!storedPath.empty()) {
+                                fprintf(f, "img 0 x=%g y=%g w=%g h=%g src=%s\n",
+                                        img.x, img.y, img.w, img.h, storedPath.c_str());
+                            }
+                        }
                     }
-                    if (!pg->bgFile.empty())
-                        fprintf(f, "bg src=%s w=%g h=%g\n", pg->bgFile.c_str(), pg->bgW, pg->bgH);
+                    if (!pg->bgFile.empty()) {
+                        const std::string storedPath = LegacyNoteResourceHelper::stageForNote(
+                            targetNotePath, utf8_to_path(pg->bgFile), sourceNotePath);
+                        if (!storedPath.empty()) {
+                            fprintf(f, "bg src=%s w=%g h=%g\n", storedPath.c_str(), pg->bgW, pg->bgH);
+                        }
+                    }
                 }
                 fclose(f);
                 logInfo("已匯出筆記: %s", target.c_str());
@@ -3007,6 +3253,8 @@ static void on_batch_export(GtkButton*, gpointer) {
                 // Write directly using FILE* for wide path support
                 FILE* f = wfopen_utf8(target, L"wb");
                 if (f) {
+                    const fs::path targetNotePath = utf8_to_path(target);
+                    const fs::path sourceNotePath = utf8_to_path(note_filename(nd));
                     fprintf(f, "# OfflineNote v1\nname=%s\npages=%zu\n", nd->name.c_str(), nd->pages.size());
                     for (size_t pi = 0; pi < nd->pages.size(); pi++) {
                         PageData* pg = &nd->pages[pi];
@@ -3018,18 +3266,27 @@ static void on_batch_export(GtkButton*, gpointer) {
                                 fprintf(f, "p %g %g\n", s.x[j], s.y[j]);
                         }
                         for (auto& t : pg->texts) {
-                            std::string esc = t.text;
-                            for (auto& c : esc) { if (c == '\n') c = ' '; if (c == '|') c = '-'; }
+                            std::string esc = LegacyNoteTextCodec::encode(t.text);
                             fprintf(f, "t 0 x=%g y=%g fs=%g r=%g g=%g b=%g txt=%s\n",
                                     t.x, t.y, t.fontSize, t.r, t.g, t.b, esc.c_str());
                         }
                         for (auto& img : pg->images) {
-                            if (!img.srcFile.empty())
-                                fprintf(f, "img 0 x=%g y=%g w=%g h=%g src=%s\n",
-                                        img.x, img.y, img.w, img.h, img.srcFile.c_str());
+                            if (!img.srcFile.empty()) {
+                                const std::string storedPath = LegacyNoteResourceHelper::stageForNote(
+                                    targetNotePath, utf8_to_path(img.srcFile), sourceNotePath);
+                                if (!storedPath.empty()) {
+                                    fprintf(f, "img 0 x=%g y=%g w=%g h=%g src=%s\n",
+                                            img.x, img.y, img.w, img.h, storedPath.c_str());
+                                }
+                            }
                         }
-                        if (!pg->bgFile.empty())
-                            fprintf(f, "bg src=%s w=%g h=%g\n", pg->bgFile.c_str(), pg->bgW, pg->bgH);
+                        if (!pg->bgFile.empty()) {
+                            const std::string storedPath = LegacyNoteResourceHelper::stageForNote(
+                                targetNotePath, utf8_to_path(pg->bgFile), sourceNotePath);
+                            if (!storedPath.empty()) {
+                                fprintf(f, "bg src=%s w=%g h=%g\n", storedPath.c_str(), pg->bgW, pg->bgH);
+                            }
+                        }
                     }
                     fclose(f);
                     exported++; continue;
@@ -3079,6 +3336,7 @@ static void on_import_note(GtkButton*, gpointer) {
 // PDF 匯入
 #include "../import/PdfImporter.h"
 
+#if 0
 static void on_import_pdf(GtkButton*, gpointer) {
     GtkWidget* dlg = gtk_file_chooser_dialog_new("匯入 PDF", GTK_WINDOW(G.window),
         GTK_FILE_CHOOSER_ACTION_OPEN, "取消", GTK_RESPONSE_CANCEL, "匯入", GTK_RESPONSE_ACCEPT, nullptr);
@@ -3157,6 +3415,165 @@ static void on_import_pdf(GtkButton*, gpointer) {
             g_free(fn);
         }
     }
+    gtk_widget_destroy(dlg);
+}
+#endif
+
+static void on_import_pdf_safe(GtkButton*, gpointer) {
+    GtkWidget* dlg = gtk_file_chooser_dialog_new("匯入 PDF", GTK_WINDOW(G.window),
+        GTK_FILE_CHOOSER_ACTION_OPEN, "取消", GTK_RESPONSE_CANCEL, "匯入", GTK_RESPONSE_ACCEPT, nullptr);
+    GtkFileFilter* f = gtk_file_filter_new();
+    gtk_file_filter_set_name(f, "PDF 文件");
+    gtk_file_filter_add_pattern(f, "*.pdf");
+    gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dlg), f);
+
+    if (gtk_dialog_run(GTK_DIALOG(dlg)) == GTK_RESPONSE_ACCEPT) {
+        char* fn = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dlg));
+        if (fn) {
+            struct ImportedPdfPageData {
+                std::string bgFile;
+                cairo_surface_t* bgSurf = nullptr;
+                double width = 0.0;
+                double height = 0.0;
+                int pdfPageNum = -1;
+
+                ImportedPdfPageData() = default;
+                ImportedPdfPageData(const ImportedPdfPageData&) = delete;
+                ImportedPdfPageData& operator=(const ImportedPdfPageData&) = delete;
+                ImportedPdfPageData(ImportedPdfPageData&& other) noexcept
+                    : bgFile(std::move(other.bgFile)),
+                      bgSurf(other.bgSurf),
+                      width(other.width),
+                      height(other.height),
+                      pdfPageNum(other.pdfPageNum) {
+                    other.bgSurf = nullptr;
+                }
+                ImportedPdfPageData& operator=(ImportedPdfPageData&& other) noexcept {
+                    if (this == &other) return *this;
+                    if (bgSurf) cairo_surface_destroy(bgSurf);
+                    bgFile = std::move(other.bgFile);
+                    bgSurf = other.bgSurf;
+                    width = other.width;
+                    height = other.height;
+                    pdfPageNum = other.pdfPageNum;
+                    other.bgSurf = nullptr;
+                    return *this;
+                }
+                ~ImportedPdfPageData() {
+                    if (bgSurf) cairo_surface_destroy(bgSurf);
+                }
+            };
+
+            std::string pdfPath(fn);
+            auto pathResult = PathValidator::validatePdfPath(utf8_to_path(pdfPath), true);
+            if (!pathResult.valid) {
+                GtkWidget* err = gtk_message_dialog_new(GTK_WINDOW(G.window), GTK_DIALOG_MODAL,
+                    GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "PDF 路徑無效，已取消匯入。");
+                gtk_dialog_run(GTK_DIALOG(err));
+                gtk_widget_destroy(err);
+                g_free(fn);
+                gtk_widget_destroy(dlg);
+                return;
+            }
+
+            pdfPath = pathResult.canonical.u8string();
+            const fs::path saveDirPath = utf8_to_path(get_save_dir());
+            const std::string baseName = pdf_import_note_name(pdfPath);
+            const fs::path importDir = PdfImportPlan::uniquePdfImportDirectory(saveDirPath, baseName);
+            const std::string importDirName = importDir.filename().u8string();
+
+            auto pages = PdfImporter::importPdf(pdfPath, importDir.u8string());
+            if (pages.empty()) {
+                GtkWidget* err = gtk_message_dialog_new(GTK_WINDOW(G.window), GTK_DIALOG_MODAL,
+                    GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "PDF 匯入失敗，未建立任何頁面。");
+                gtk_dialog_run(GTK_DIALOG(err));
+                gtk_widget_destroy(err);
+                g_free(fn);
+                gtk_widget_destroy(dlg);
+                return;
+            }
+
+            std::vector<ImportedPdfPageData> preparedPages;
+            preparedPages.reserve(pages.size());
+            bool preloadFailed = false;
+            for (const auto& pg : pages) {
+                ImportedPdfPageData prepared;
+                prepared.bgFile = importDirName + "/" + pg.bgImagePath;
+                prepared.width = pg.width;
+                prepared.height = pg.height;
+                prepared.pdfPageNum = pg.pdfPageNum;
+
+                const fs::path fullPath = saveDirPath / fs::u8path(prepared.bgFile);
+                prepared.bgSurf = load_image_surface(fullPath.u8string().c_str());
+                if (!prepared.bgSurf || cairo_surface_status(prepared.bgSurf) != CAIRO_STATUS_SUCCESS) {
+                    preloadFailed = true;
+                    break;
+                }
+
+                preparedPages.push_back(std::move(prepared));
+            }
+
+            if (preloadFailed || preparedPages.size() != pages.size()) {
+                std::error_code ec;
+                fs::remove_all(importDir, ec);
+                GtkWidget* err = gtk_message_dialog_new(GTK_WINDOW(G.window), GTK_DIALOG_MODAL,
+                    GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "PDF 已轉出頁面，但背景載入失敗，匯入已取消以避免假成功。");
+                gtk_dialog_run(GTK_DIALOG(err));
+                gtk_widget_destroy(err);
+                g_free(fn);
+                gtk_widget_destroy(dlg);
+                return;
+            }
+
+            NoteData* nd = curNote();
+            bool createdNewNote = false;
+            if (!nd) {
+                G.notes.push_back(NoteData());
+                nd = &G.notes.back();
+                G.selNote = (int)G.notes.size() - 1;
+                createdNewNote = true;
+            }
+
+            const bool replaceBlankNote = nd && is_blank_note_for_pdf_import(*nd);
+            const int firstImportedPage = replaceBlankNote ? 0 : (int)nd->pages.size();
+            if (replaceBlankNote) {
+                nd->pages.clear();
+                nd->name = baseName;
+            } else if (createdNewNote || nd->name.empty()) {
+                nd->name = baseName;
+            }
+
+            for (auto& prepared : preparedPages) {
+                nd->pages.push_back(PageData());
+                PageData* pd = &nd->pages.back();
+                pd->pw = prepared.width;
+                pd->ph = prepared.height;
+                pd->pdfPageNum = prepared.pdfPageNum;
+                pd->bgFile = prepared.bgFile;
+                pd->bgW = prepared.width;
+                pd->bgH = prepared.height;
+                pd->bgSurf = prepared.bgSurf;
+                prepared.bgSurf = nullptr;
+            }
+
+            nd->dirty = 1;
+            G.selPage = firstImportedPage;
+            clamp_page_scroll(curPage());
+            rebuildNoteList();
+            rebuildThumbs();
+            invalidate_canvas_and_refresh();
+
+            char msg[256];
+            snprintf(msg, sizeof(msg), "PDF 匯入成功。\n%d 頁已加入目前筆記。", (int)preparedPages.size());
+            GtkWidget* info = gtk_message_dialog_new(GTK_WINDOW(G.window), GTK_DIALOG_MODAL,
+                GTK_MESSAGE_INFO, GTK_BUTTONS_OK, "%s", msg);
+            gtk_dialog_run(GTK_DIALOG(info));
+            gtk_widget_destroy(info);
+
+            g_free(fn);
+        }
+    }
+
     gtk_widget_destroy(dlg);
 }
 
@@ -3289,14 +3706,9 @@ static void on_about(GtkButton*, gpointer) {
     gtk_dialog_run(GTK_DIALOG(dlg));gtk_widget_destroy(dlg);
 }
 static void on_quit(GtkButton*, gpointer) {
-    // Auto-save all dirty notes
-    for(auto& n:G.notes){
-        if(n.dirty){
-            save_note_to_file(&n);
-            logInfo("Auto-save: %s",n.name.c_str());
-        }
+    if (G.window) {
+        gtk_window_close(GTK_WINDOW(G.window));
     }
-    gtk_widget_destroy(G.window);
 }
 
 // ============================================================
@@ -3416,7 +3828,7 @@ MainWindow::MainWindow(GtkApplication* app, AppController& ctrl) : app_(app), co
     tb(toolbar,"📦 批次匯出",G_CALLBACK(on_batch_export));
     tb(toolbar,"📥 匯入筆記",G_CALLBACK(on_import_note));
     tb(toolbar,"📂 批次匯入",G_CALLBACK(on_batch_import));
-    tb(toolbar,"📕 匯入 PDF",G_CALLBACK(on_import_pdf));
+    tb(toolbar,"📕 匯入 PDF",G_CALLBACK(on_import_pdf_safe));
 
     // Color button
     GtkWidget* colorBtn = gtk_button_new_with_label("🎨顏色");
@@ -3567,15 +3979,64 @@ MainWindow::MainWindow(GtkApplication* app, AppController& ctrl) : app_(app), co
     gtk_box_pack_end(GTK_BOX(bottomBox),G.lblZoom,FALSE,FALSE,8);
     gtk_box_pack_end(GTK_BOX(bottomBox),G.lblStatus,FALSE,FALSE,8);
 
-    // ── Load existing notes ──
     std::string saveDir = get_save_dir();
     std::wstring wSaveDir = utf8_to_wide(saveDir);
+    const fs::path saveDirPath = utf8_to_path(saveDir);
+    std::error_code saveDirEc;
+    fs::create_directories(saveDirPath, saveDirEc);
+
+    G.crashRecoveryFile = CrashRecovery::snapshotPath(saveDirPath).u8string();
+    G.crashRecoveryMarkerFile = CrashRecovery::sessionMarkerPath(saveDirPath).u8string();
+
+    const bool hadRecoverySnapshot = fs::exists(crash_recovery_snapshot_path());
+    const bool hadSessionMarker = fs::exists(crash_recovery_marker_path());
+    const bool shouldRestoreRecovery = CrashRecovery::shouldRestoreSnapshot(hadRecoverySnapshot, hadSessionMarker);
+
+    if (CrashRecovery::shouldDeleteStaleSnapshot(hadRecoverySnapshot, hadSessionMarker)) {
+        remove_file_if_exists(crash_recovery_snapshot_path(), "stale crash recovery snapshot");
+    }
+    if (hadSessionMarker) {
+        remove_file_if_exists(crash_recovery_marker_path(), "previous crash recovery session marker");
+    }
+    write_session_marker();
+
+    // ── Load existing notes ──
     if (fs::exists(wSaveDir)) {
         for (auto& entry : fs::directory_iterator(wSaveDir)) {
-            if (entry.path().extension() == ".onote") {
+            if (entry.path().extension() == ".onote" &&
+                !CrashRecovery::isSnapshotFile(entry.path())) {
                 // Use u8string() for proper UTF-8 encoding
                 on_load_note(entry.path().u8string());
             }
+        }
+    }
+
+    bool restoredRecoveryNote = false;
+    if (shouldRestoreRecovery && fs::exists(crash_recovery_snapshot_path())) {
+        const size_t noteCountBefore = G.notes.size();
+        on_load_note(G.crashRecoveryFile);
+        if (G.notes.size() > noteCountBefore) {
+            NoteData& recovered = G.notes.back();
+            recovered.name = CrashRecovery::recoveredNoteName(recovered.name);
+            recovered.dirty = 1;
+            G.selNote = (int)G.notes.size() - 1;
+            G.selPage = 0;
+            restoredRecoveryNote = true;
+            rebuildNoteList();
+            renderCanvas();
+            updateStatus();
+            rebuildThumbs();
+
+            GtkWidget* info = gtk_message_dialog_new(GTK_WINDOW(G.window), GTK_DIALOG_MODAL,
+                GTK_MESSAGE_WARNING, GTK_BUTTONS_OK,
+                "Recovered unsaved changes from the previous session.");
+            gtk_message_dialog_format_secondary_text(GTK_MESSAGE_DIALOG(info),
+                "A crash recovery copy was restored as a separate note so it does not silently disappear.");
+            gtk_dialog_run(GTK_DIALOG(info));
+            gtk_widget_destroy(info);
+            logInfo("Recovered note restored from crash recovery snapshot");
+        } else {
+            logInfo("Crash recovery snapshot was present but could not be restored");
         }
     }
 
@@ -3585,7 +4046,7 @@ MainWindow::MainWindow(GtkApplication* app, AppController& ctrl) : app_(app), co
         G.notes[0].name = "筆記 1";
         G.notes[0].pages.push_back(PageData());
         G.selNote = 0; G.selPage = 0;
-    } else {
+    } else if (!restoredRecoveryNote) {
         G.selNote = 0; G.selPage = 0;
     }
 
@@ -3596,16 +4057,6 @@ MainWindow::MainWindow(GtkApplication* app, AppController& ctrl) : app_(app), co
 
     // ── Auto-save timer (every 30 seconds) ──
     G.autoSaveTimer = g_timeout_add_seconds(30, auto_save_callback, nullptr);
-
-    // ── Crash recovery ──
-    G.crashRecoveryFile = get_save_dir() + "/crash_recovery.onote";
-
-    // On normal startup, delete any existing crash recovery file (means previous session ended normally)
-    if (fs::exists(G.crashRecoveryFile)) {
-        fs::remove(G.crashRecoveryFile);
-    }
-
-    // ── Load existing notes ──
 
     // ── Keyboard shortcut hint in status bar ──
     gtk_widget_set_tooltip_text(G.lblStatus,
@@ -3629,12 +4080,7 @@ MainWindow::MainWindow(GtkApplication* app, AppController& ctrl) : app_(app), co
             g_source_remove(G.autoSaveTimer);
             G.autoSaveTimer = 0;
         }
-        // Auto-save all dirty notes
-        for (auto& n : G.notes) {
-            if (n.dirty) {
-                save_note_to_file(&n);
-            }
-        }
+        persist_notes_for_shutdown();
         // Return FALSE to let the default handler destroy the window and quit the app
         // Returning TRUE would inhibit the default handler, causing the app to hang
         return FALSE;

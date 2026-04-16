@@ -24,12 +24,9 @@ public:
 
 private:
     static void onActivate(GtkApplication* gtkApp, gpointer userData);
-    static void onOpen(GtkApplication* gtkApp, GFile** files,
-                       gint nFiles, const gchar* hint, gpointer userData);
     static void onShutdown(GtkApplication* gtkApp, gpointer userData);
 
     void handleActivate();
-    void handleOpen(GFile** files, gint nFiles);
     void handleShutdown();
     void setupCSS();
 
