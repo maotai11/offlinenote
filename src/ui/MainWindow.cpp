@@ -134,6 +134,7 @@ static struct {
     int selImg = -1, selTxt = -1, selStroke = -1;
     int selBg = 0; // 1 = background selected
     int dragging = 0, resizing = 0;
+    int groupDragging = 0; // 1 = dragging multiple selected objects together
     double dragOffX = 0, dragOffY = 0, selResizeW = 0, selResizeH = 0;
     double selResizeOrigW = 0, selResizeOrigH = 0; // For bg resize
     double imgRotateAngle = 0;  // 圖片旋轉角度（0, 90, 180, 270）
@@ -1061,6 +1062,48 @@ static gboolean on_btnpress(GtkWidget*, GdkEventButton* ev, gpointer) {
             return TRUE;
         }
 
+        // 0. If multi-select is active, check if click lands on any selected object → group drag
+        if (!G.selTexts.empty() || !G.selStrokes.empty() || !G.selImages.empty()) {
+            double hitDist = 15.0 / G.zoom;
+            bool hitSel = false;
+            for (int si : G.selStrokes) {
+                if (si < 0 || si >= (int)pg->strokes.size()) continue;
+                StrokeData* s = &pg->strokes[si];
+                for (size_t j = 0; j < s->x.size(); j++) {
+                    double dx = px - s->x[j], dy = py - s->y[j];
+                    if (sqrt(dx*dx+dy*dy) < hitDist) { hitSel = true; break; }
+                }
+                if (hitSel) break;
+            }
+            if (!hitSel) {
+                for (int ti : G.selTexts) {
+                    if (ti < 0 || ti >= (int)pg->texts.size()) continue;
+                    TxtEl* t = &pg->texts[ti];
+                    double pad = 15.0;
+                    if (px >= t->x-pad && py >= t->y-t->fontSize*1.2-pad &&
+                        px <= t->x+200 && py <= t->y+pad) { hitSel = true; break; }
+                }
+            }
+            if (!hitSel) {
+                for (int ii : G.selImages) {
+                    if (ii < 0 || ii >= (int)pg->images.size()) continue;
+                    ImgEl* img = &pg->images[ii];
+                    if (px >= img->x && px <= img->x+img->w &&
+                        py >= img->y && py <= img->y+img->h) { hitSel = true; break; }
+                }
+            }
+            if (hitSel) {
+                G.groupDragging = 1;
+                G.dragging = 1;
+                G.dragOffX = px; G.dragOffY = py;
+                renderCanvas(); updateStatus();
+                return TRUE;
+            }
+            // Click missed multi-select — clear it and fall through to single-select
+            G.selTexts.clear(); G.selStrokes.clear(); G.selImages.clear();
+            G.groupDragging = 0;
+        }
+
         // 1. Check strokes first (highest priority for content)
         double strokeHitDist = 15.0 / G.zoom;
         for (int i = (int)pg->strokes.size()-1; i >= 0; i--) {
@@ -1252,6 +1295,7 @@ static gboolean on_btnrelease(GtkWidget*, GdkEventButton*, gpointer) {
     G.drawing = 0;
     G.dragging = 0;
     G.resizing = 0;
+    G.groupDragging = 0;
     // Save state after any mouse interaction completes
     pushUndo();
     NoteData* n=curNote();if(n)n->dirty=1;
@@ -1270,6 +1314,34 @@ static gboolean on_motion(GtkWidget*, GdkEventMotion* ev, gpointer) {
         G.selBoxW = px - G.selBoxX;
         G.selBoxH = py - G.selBoxY;
         renderCanvas();  // Will draw selection box overlay
+        return TRUE;
+    }
+
+    if (G.dragging && G.groupDragging) {
+        double dx = px - G.dragOffX, dy = py - G.dragOffY;
+        for (int i : G.selTexts) {
+            if (i >= 0 && i < (int)pg->texts.size()) {
+                pg->texts[i].x += dx;
+                pg->texts[i].y += dy;
+            }
+        }
+        for (int i : G.selStrokes) {
+            if (i >= 0 && i < (int)pg->strokes.size()) {
+                for (size_t j = 0; j < pg->strokes[i].x.size(); j++) {
+                    pg->strokes[i].x[j] += dx;
+                    pg->strokes[i].y[j] += dy;
+                }
+            }
+        }
+        for (int i : G.selImages) {
+            if (i >= 0 && i < (int)pg->images.size()) {
+                pg->images[i].x += dx;
+                pg->images[i].y += dy;
+            }
+        }
+        G.dragOffX = px; G.dragOffY = py;
+        NoteData* n = curNote(); if(n) n->dirty = 1;
+        renderCanvas();
         return TRUE;
     }
 
@@ -1551,24 +1623,47 @@ static gboolean on_keypress(GtkWidget*, GdkEventKey* ev, gpointer) {
         }
     }
 
-    // Delete
+    // Delete — handles multi-select and single-select
     if (ev->keyval == GDK_KEY_Delete || ev->keyval == GDK_KEY_BackSpace) {
-        if (G.selImg >= 0 && G.selImg < (int)pg->images.size()) {
+        bool deletedAny = false;
+        // 1. Multi-select batch delete
+        if (!G.selTexts.empty() || !G.selStrokes.empty() || !G.selImages.empty()) {
+            pushUndo();
+            for (int i = (int)G.selTexts.size()-1; i >= 0; i--) {
+                if (G.selTexts[i] >= 0 && G.selTexts[i] < (int)pg->texts.size())
+                    pg->texts.erase(pg->texts.begin() + G.selTexts[i]);
+            }
+            G.selTexts.clear(); G.selTxt = -1;
+            for (int i = (int)G.selStrokes.size()-1; i >= 0; i--) {
+                if (G.selStrokes[i] >= 0 && G.selStrokes[i] < (int)pg->strokes.size())
+                    pg->strokes.erase(pg->strokes.begin() + G.selStrokes[i]);
+            }
+            G.selStrokes.clear(); G.selStroke = -1;
+            for (int i = (int)G.selImages.size()-1; i >= 0; i--) {
+                if (G.selImages[i] >= 0 && G.selImages[i] < (int)pg->images.size())
+                    pg->images.erase(pg->images.begin() + G.selImages[i]);
+            }
+            G.selImages.clear(); G.selImg = -1;
+            G.groupDragging = 0;
+            deletedAny = true;
+        }
+        // 2. Single-item delete
+        if (!deletedAny && G.selImg >= 0 && G.selImg < (int)pg->images.size()) {
+            pushUndo();
             pg->images.erase(pg->images.begin()+G.selImg);
-            G.selImg=-1;
-            NoteData* n=curNote(); if(n)n->dirty=1;
-            renderCanvas(); updateStatus();
-            return TRUE;
+            G.selImg=-1; deletedAny = true;
         }
-        if (G.selTxt >= 0 && G.selTxt < (int)pg->texts.size()) {
+        if (!deletedAny && G.selTxt >= 0 && G.selTxt < (int)pg->texts.size()) {
+            pushUndo();
             pg->texts.erase(pg->texts.begin()+G.selTxt);
-            G.selTxt=-1;
-            NoteData* n=curNote(); if(n)n->dirty=1;
-            renderCanvas(); updateStatus();
-            return TRUE;
+            G.selTxt=-1; deletedAny = true;
         }
-        if (!pg->strokes.empty()) {
-            pg->strokes.pop_back();
+        if (!deletedAny && G.selStroke >= 0 && G.selStroke < (int)pg->strokes.size()) {
+            pushUndo();
+            pg->strokes.erase(pg->strokes.begin()+G.selStroke);
+            G.selStroke=-1; deletedAny = true;
+        }
+        if (deletedAny) {
             NoteData* n=curNote(); if(n)n->dirty=1;
             renderCanvas(); updateStatus();
             return TRUE;

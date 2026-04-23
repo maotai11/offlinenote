@@ -71,7 +71,7 @@ if ($DllMissing.Count -gt 0) {
 # ── 4. 產生安全報告
 Write-Host "[4/5] 產生安全驗證報告..." -ForegroundColor Yellow
 $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-$Version = "4.0.3"
+$Version = "4.0.4"
 $BuildTimestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 
 $ReportPath = "$PortableDir\SECURITY-AUDIT-REPORT.txt"
