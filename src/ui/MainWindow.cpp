@@ -11,6 +11,7 @@
 #include "../util/FileUtils.h"
 #include "../util/PathValidator.h"
 #include "../util/PdfImportPlan.h"
+#include "Version.h"
 
 #include <cairo-pdf.h>
 #include <gdk/gdkkeysyms.h>
@@ -22,6 +23,8 @@
 #include <string>
 #include <cstdio>
 #include <algorithm>
+#include <cctype>
+#include <climits>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -147,6 +150,9 @@ static struct {
     std::vector<int> selTexts;    // multiple selected text indices
     std::vector<int> selStrokes;  // multiple selected stroke indices
     std::vector<int> selImages;   // multiple selected image indices
+    int pendingMultiToggle = 0;
+    double multiPressX = 0, multiPressY = 0;
+    int mouseUndoActive = 0;
 
     // Auto-save
     guint autoSaveTimer = 0;
@@ -208,7 +214,7 @@ struct DirtySaveSummary {
 // Helpers
 // ============================================================
 static NoteData* curNote() {
-    return (G.selNote >= 0 && G.selNote < (int)G.notes.size()) ? &G.notes[G.selNote] : nullptr;
+    return (G.selNote >= 0 && G.selNote < (int)G.notes.size()) ? &G.notes[static_cast<size_t>(G.selNote)] : nullptr;
 }
 
 static std::string serializeCurrentNote() { return serializeNote(curNote()); }
@@ -463,9 +469,166 @@ static void pushUndo() {
         G.redoStack.clear();
     }
 }
+
+static void beginMouseUndo() {
+    if (G.mouseUndoActive) return;
+    pushUndo();
+    G.mouseUndoActive = 1;
+}
+
 static PageData* curPage() {
     NoteData* n = curNote();
-    return (n && G.selPage >= 0 && G.selPage < (int)n->pages.size()) ? &n->pages[G.selPage] : nullptr;
+    return (n && G.selPage >= 0 && G.selPage < (int)n->pages.size()) ? &n->pages[static_cast<size_t>(G.selPage)] : nullptr;
+}
+
+static bool indexInSelection(const std::vector<int>& indices, int value) {
+    return std::find(indices.begin(), indices.end(), value) != indices.end();
+}
+
+static bool removeSelectedIndex(std::vector<int>& indices, int value) {
+    auto it = std::find(indices.begin(), indices.end(), value);
+    if (it == indices.end()) return false;
+    indices.erase(it);
+    return true;
+}
+
+static bool hasMultiSelection() {
+    return !G.selTexts.empty() || !G.selStrokes.empty() || !G.selImages.empty();
+}
+
+template <typename T>
+static bool validIndex(const std::vector<T>& items, int index) {
+    return index >= 0 && static_cast<size_t>(index) < items.size();
+}
+
+template <typename T>
+static T* itemAt(std::vector<T>& items, int index) {
+    return validIndex(items, index) ? &items[static_cast<size_t>(index)] : nullptr;
+}
+
+static int boundedIntCount(size_t value) {
+    return value > static_cast<size_t>(INT_MAX) ? INT_MAX : static_cast<int>(value);
+}
+
+template <typename T>
+static bool eraseSelectedIndices(std::vector<T>& items, std::vector<int>& selected) {
+    std::sort(selected.begin(), selected.end(), std::greater<int>());
+    selected.erase(std::unique(selected.begin(), selected.end()), selected.end());
+
+    bool deleted = false;
+    for (int index : selected) {
+        if (!validIndex(items, index)) continue;
+        items.erase(items.begin() + static_cast<typename std::vector<T>::difference_type>(index));
+        deleted = true;
+    }
+    selected.clear();
+    return deleted;
+}
+
+static bool eraseSelectedItems(PageData* pg) {
+    if (!pg) return false;
+
+    bool deleted = eraseSelectedIndices(pg->texts, G.selTexts);
+    deleted = eraseSelectedIndices(pg->strokes, G.selStrokes) || deleted;
+    deleted = eraseSelectedIndices(pg->images, G.selImages) || deleted;
+
+    if (deleted) {
+        G.selTxt = -1;
+        G.selStroke = -1;
+        G.selImg = -1;
+        G.groupDragging = 0;
+    }
+    return deleted;
+}
+
+static bool toggleHitFromMultiSelection(PageData* pg, double px, double py) {
+    if (!pg || !hasMultiSelection()) return false;
+
+    const double strokeHitDist = 15.0 / G.zoom;
+    for (int si : G.selStrokes) {
+        StrokeData* s = itemAt(pg->strokes, si);
+        if (!s) continue;
+        for (size_t j = 0; j < s->x.size(); j++) {
+            const double dx = px - s->x[j];
+            const double dy = py - s->y[j];
+            if (sqrt(dx * dx + dy * dy) < strokeHitDist) {
+                removeSelectedIndex(G.selStrokes, si);
+                return true;
+            }
+        }
+    }
+
+    for (int ti : G.selTexts) {
+        TxtEl* t = itemAt(pg->texts, ti);
+        if (!t) continue;
+        const double pad = 15.0;
+        if (px >= t->x - pad && py >= t->y - t->fontSize * 1.2 - pad &&
+            px <= t->x + 200 && py <= t->y + pad) {
+            removeSelectedIndex(G.selTexts, ti);
+            return true;
+        }
+    }
+
+    for (int ii : G.selImages) {
+        ImgEl* img = itemAt(pg->images, ii);
+        if (!img) continue;
+        if (px >= img->x && px <= img->x + img->w &&
+            py >= img->y && py <= img->y + img->h) {
+            removeSelectedIndex(G.selImages, ii);
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool hitMultiSelection(PageData* pg, double px, double py) {
+    if (!pg || !hasMultiSelection()) return false;
+
+    const double strokeHitDist = 15.0 / G.zoom;
+    for (int si : G.selStrokes) {
+        StrokeData* s = itemAt(pg->strokes, si);
+        if (!s) continue;
+        for (size_t j = 0; j < s->x.size(); j++) {
+            const double dx = px - s->x[j];
+            const double dy = py - s->y[j];
+            if (sqrt(dx * dx + dy * dy) < strokeHitDist) return true;
+        }
+    }
+
+    for (int ti : G.selTexts) {
+        TxtEl* t = itemAt(pg->texts, ti);
+        if (!t) continue;
+        const double pad = 15.0;
+        if (px >= t->x - pad && py >= t->y - t->fontSize * 1.2 - pad &&
+            px <= t->x + 200 && py <= t->y + pad) {
+            return true;
+        }
+    }
+
+    for (int ii : G.selImages) {
+        ImgEl* img = itemAt(pg->images, ii);
+        if (!img) continue;
+        if (px >= img->x && px <= img->x + img->w &&
+            py >= img->y && py <= img->y + img->h) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void setDashedLine(cairo_t* cr, double first, double second) {
+    const double dash[] = { first, second };
+    cairo_set_dash(cr, dash, 2, 0);
+}
+
+static char lowerByte(char value) {
+    return static_cast<char>(std::tolower(static_cast<unsigned char>(value)));
+}
+
+static void destroyChild(GtkWidget* child, gpointer) {
+    gtk_widget_destroy(child);
 }
 
 static void logInfo(const char* fmt, ...) {
@@ -490,7 +653,7 @@ static void updateStatus() {
 
     // Show multi-selection count
     char selInfo[64] = "";
-    int totalSel = G.selTexts.size() + G.selStrokes.size() + G.selImages.size();
+    int totalSel = boundedIntCount(G.selTexts.size() + G.selStrokes.size() + G.selImages.size());
     if (totalSel > 0) {
         snprintf(selInfo, sizeof(selInfo), " [已選%d]", totalSel);
     }
@@ -549,9 +712,8 @@ static void updatePropPanel() {
     PageData* pg = curPage();
     if (!pg) { gtk_widget_hide(G.propPanel); return; }
 
-    if (G.selTxt >= 0 && G.selTxt < (int)pg->texts.size()) {
+    if (TxtEl* t = itemAt(pg->texts, G.selTxt)) {
         // Text selected - show text properties
-        TxtEl* t = &pg->texts[G.selTxt];
         gtk_label_set_text(GTK_LABEL(G.propLabel), "文字屬性");
         if (G.propFontSize) gtk_spin_button_set_value(GTK_SPIN_BUTTON(G.propFontSize), t->fontSize);
         if (G.propColorBtn) {
@@ -559,9 +721,8 @@ static void updatePropPanel() {
             gtk_color_chooser_set_rgba(GTK_COLOR_CHOOSER(G.propColorBtn), &c);
         }
         gtk_widget_show_all(G.propPanel);
-    } else if (G.selImg >= 0 && G.selImg < (int)pg->images.size()) {
+    } else if (ImgEl* img = itemAt(pg->images, G.selImg)) {
         // Image selected
-        ImgEl* img = &pg->images[G.selImg];
         char info[64];
         snprintf(info, sizeof(info), "圖片: %.0f x %.0f", img->w, img->h);
         gtk_label_set_text(GTK_LABEL(G.propLabel), info);
@@ -573,24 +734,24 @@ static void updatePropPanel() {
 }
 
 static void on_prop_font_changed(GtkSpinButton*, gpointer) {
-    if (G.selTxt < 0) return;
     PageData* pg = curPage();
-    if (!pg || G.selTxt >= (int)pg->texts.size()) return;
-    pg->texts[G.selTxt].fontSize = gtk_spin_button_get_value(GTK_SPIN_BUTTON(G.propFontSize));
+    TxtEl* text = pg ? itemAt(pg->texts, G.selTxt) : nullptr;
+    if (!text) return;
+    text->fontSize = gtk_spin_button_get_value(GTK_SPIN_BUTTON(G.propFontSize));
     NoteData* n = curNote(); if(n) n->dirty = 1;
     if (G.canvasSurf) { cairo_surface_destroy(G.canvasSurf); G.canvasSurf = nullptr; }
     renderCanvas();
 }
 
 static void on_prop_color_changed(GtkWidget* btn, gpointer) {
-    if (G.selTxt < 0) return;
     PageData* pg = curPage();
-    if (!pg || G.selTxt >= (int)pg->texts.size()) return;
+    TxtEl* text = pg ? itemAt(pg->texts, G.selTxt) : nullptr;
+    if (!text) return;
     GdkRGBA c;
     gtk_color_chooser_get_rgba(GTK_COLOR_CHOOSER(btn), &c);
-    pg->texts[G.selTxt].r = c.red;
-    pg->texts[G.selTxt].g = c.green;
-    pg->texts[G.selTxt].b = c.blue;
+    text->r = c.red;
+    text->g = c.green;
+    text->b = c.blue;
     NoteData* n = curNote(); if(n) n->dirty = 1;
     if (G.canvasSurf) { cairo_surface_destroy(G.canvasSurf); G.canvasSurf = nullptr; }
     renderCanvas();
@@ -613,17 +774,24 @@ static void commitTextEntry() {
         int fs = 14;
         if (G.textSizeSpin) fs = (int)gtk_spin_button_get_value(GTK_SPIN_BUTTON(G.textSizeSpin));
 
-        double px = (G.textEntryX - G.margins[0]) / G.zoom;
-        double py = (G.textEntryY - G.margins[1]) / G.zoom;
+        double px = (G.textEntryX - G.margins[0] - G.pageScrollX) / G.zoom;
+        double py = (G.textEntryY - G.margins[1] - G.pageScrollY) / G.zoom;
 
-        if (G.textEditMode && G.textEditIdx >= 0 && G.textEditIdx < (int)pg->texts.size()) {
+        bool changed = false;
+        if (G.textEditMode) {
             // Edit existing text
-            pg->texts[G.textEditIdx].text = txt;
-            pg->texts[G.textEditIdx].fontSize = fs;
+            TxtEl* text = itemAt(pg->texts, G.textEditIdx);
+            if (text) {
+                pushUndo();
+                text->text = txt;
+                text->fontSize = fs;
+                changed = true;
+            }
             G.textEditMode = 0;
             G.textEditIdx = -1;
         } else {
             // New text
+            pushUndo();
             pg->texts.push_back(TxtEl());
             TxtEl* t = &pg->texts.back();
             t->text = txt;
@@ -631,8 +799,11 @@ static void commitTextEntry() {
             t->y = fmax(0.0, py);
             t->fontSize = fs;
             t->r = G.penR; t->g = G.penG; t->b = G.penB;
+            changed = true;
         }
-        NoteData* nd = curNote(); if(nd) nd->dirty = 1;
+        if (changed) {
+            NoteData* nd = curNote(); if(nd) nd->dirty = 1;
+        }
     }
 
     g_free(txt);
@@ -746,7 +917,7 @@ static void hideTextEntry() {
     renderCanvas();
 }
 
-static void ensureTextOverlay() {
+[[maybe_unused]] static void ensureTextOverlay() {
     // Legacy: kept for compatibility, actual work done in showTextEditor
     if (G.textOverlayBox) return;
     G.textOverlayBox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
@@ -823,7 +994,7 @@ static void renderCanvas() {
         if (G.selBg && fit.valid) {
             cairo_set_source_rgba(cr, 0.2, 0.5, 1, 0.7);
             cairo_set_line_width(cr, 2);
-            cairo_set_dash(cr, (double[]){6, 3}, 2, 0);
+            setDashedLine(cr, 6, 3);
             cairo_rectangle(cr, bx, by, bw, bh);
             cairo_stroke(cr);
             cairo_set_dash(cr, nullptr, 0, 0);
@@ -866,11 +1037,12 @@ static void renderCanvas() {
         cairo_paint(cr);
         cairo_restore(cr);
 
-        if ((int)i == G.selImg) {
+        const int imageIndex = i > static_cast<size_t>(INT_MAX) ? -1 : static_cast<int>(i);
+        if (imageIndex == G.selImg || indexInSelection(G.selImages, imageIndex)) {
             // Selection border - dashed, more visible
             cairo_set_source_rgba(cr, 0.2, 0.5, 1, 0.8);
             cairo_set_line_width(cr, 3);
-            cairo_set_dash(cr, (double[]){6, 3}, 2, 0);
+            setDashedLine(cr, 6, 3);
             cairo_rectangle(cr, ix, iy, iw, ih);
             cairo_stroke(cr);
             cairo_set_dash(cr, nullptr, 0, 0);
@@ -936,13 +1108,14 @@ static void renderCanvas() {
 
         // Highlight if in multiple selection
         int isInMultiSel = 0;
-        for (int si : G.selTexts) { if (si == (int)i) { isInMultiSel = 1; break; } }
+        const int textIndex = i > static_cast<size_t>(INT_MAX) ? -1 : static_cast<int>(i);
+        for (int si : G.selTexts) { if (si == textIndex) { isInMultiSel = 1; break; } }
 
-        if ((int)i == G.selTxt || isInMultiSel) {
+        if (textIndex == G.selTxt || isInMultiSel) {
             // Dashed border for selected text
             cairo_set_source_rgba(cr, 0.2, 0.5, 1, 0.7);
             cairo_set_line_width(cr, 2);
-            cairo_set_dash(cr, (double[]){4, 3}, 2, 0);
+            setDashedLine(cr, 4, 3);
             cairo_rectangle(cr, tx-3, ty-3, tw+6, th+6);
             cairo_stroke(cr);
             cairo_set_dash(cr, nullptr, 0, 0);
@@ -978,9 +1151,12 @@ static void renderCanvas() {
         cairo_stroke(cr);
     }
 
-    // Highlight selected stroke with glow effect
-    if (G.selStroke >= 0 && G.selStroke < (int)pg->strokes.size()) {
-        StrokeData* s = &pg->strokes[G.selStroke];
+    // Highlight selected strokes with glow effect
+    for (size_t strokeOffset = 0; strokeOffset < pg->strokes.size(); strokeOffset++) {
+        if (strokeOffset > static_cast<size_t>(INT_MAX)) continue;
+        const int strokeIndex = static_cast<int>(strokeOffset);
+        if (strokeIndex != G.selStroke && !indexInSelection(G.selStrokes, strokeIndex)) continue;
+        StrokeData* s = &pg->strokes[strokeOffset];
         if (s->x.size() >= 2) {
             // Glow
             cairo_set_source_rgba(cr, 0.2, 0.5, 1, 0.25);
@@ -997,7 +1173,7 @@ static void renderCanvas() {
             for (auto py : s->y) { if(py<minY)minY=py; if(py>maxY)maxY=py; }
             cairo_set_source_rgba(cr, 0.2, 0.5, 1, 0.7);
             cairo_set_line_width(cr, 2);
-            cairo_set_dash(cr, (double[]){4, 3}, 2, 0);
+            setDashedLine(cr, 4, 3);
             cairo_rectangle(cr,
                 leftMargin+minX*G.zoom-4, topMargin+minY*G.zoom-4,
                 (maxX-minX)*G.zoom+8, (maxY-minY)*G.zoom+8);
@@ -1018,7 +1194,7 @@ static void renderCanvas() {
         cairo_fill(cr);
         cairo_set_source_rgba(cr, 0.2, 0.5, 1, 0.8);
         cairo_set_line_width(cr, 1.5);
-        cairo_set_dash(cr, (double[]){5, 3}, 2, 0);
+        setDashedLine(cr, 5, 3);
         cairo_rectangle(cr, bx, by, bw, bh);
         cairo_stroke(cr);
         cairo_set_dash(cr, nullptr, 0, 0);
@@ -1052,6 +1228,7 @@ static gboolean on_btnpress(GtkWidget*, GdkEventButton* ev, gpointer) {
     if (G.tool == 4) {
         G.selImg = -1; G.selTxt = -1; G.selStroke = -1;
         G.dragging = 0; G.resizing = 0;
+        G.pendingMultiToggle = 0;
 
         // Shift+Click = Start rubber band selection box
         if (ev->state & GDK_SHIFT_MASK) {
@@ -1062,52 +1239,29 @@ static gboolean on_btnpress(GtkWidget*, GdkEventButton* ev, gpointer) {
             return TRUE;
         }
 
-        // 0. If multi-select is active, check if click lands on any selected object → group drag
-        if (!G.selTexts.empty() || !G.selStrokes.empty() || !G.selImages.empty()) {
-            double hitDist = 15.0 / G.zoom;
-            bool hitSel = false;
-            for (int si : G.selStrokes) {
-                if (si < 0 || si >= (int)pg->strokes.size()) continue;
-                StrokeData* s = &pg->strokes[si];
-                for (size_t j = 0; j < s->x.size(); j++) {
-                    double dx = px - s->x[j], dy = py - s->y[j];
-                    if (sqrt(dx*dx+dy*dy) < hitDist) { hitSel = true; break; }
-                }
-                if (hitSel) break;
-            }
-            if (!hitSel) {
-                for (int ti : G.selTexts) {
-                    if (ti < 0 || ti >= (int)pg->texts.size()) continue;
-                    TxtEl* t = &pg->texts[ti];
-                    double pad = 15.0;
-                    if (px >= t->x-pad && py >= t->y-t->fontSize*1.2-pad &&
-                        px <= t->x+200 && py <= t->y+pad) { hitSel = true; break; }
-                }
-            }
-            if (!hitSel) {
-                for (int ii : G.selImages) {
-                    if (ii < 0 || ii >= (int)pg->images.size()) continue;
-                    ImgEl* img = &pg->images[ii];
-                    if (px >= img->x && px <= img->x+img->w &&
-                        py >= img->y && py <= img->y+img->h) { hitSel = true; break; }
-                }
-            }
-            if (hitSel) {
-                G.groupDragging = 1;
+        // 0. Multi-select refinement: click a selected object to remove it from the batch.
+        if (hasMultiSelection()) {
+            if (hitMultiSelection(pg, px, py)) {
+                G.pendingMultiToggle = 1;
                 G.dragging = 1;
+                G.groupDragging = 0;
                 G.dragOffX = px; G.dragOffY = py;
-                renderCanvas(); updateStatus();
+                G.multiPressX = px; G.multiPressY = py;
+                renderCanvas(); updateStatus(); updatePropPanel();
                 return TRUE;
             }
-            // Click missed multi-select — clear it and fall through to single-select
+
+            // Click missed multi-select — clear it and fall through to single-select.
             G.selTexts.clear(); G.selStrokes.clear(); G.selImages.clear();
             G.groupDragging = 0;
         }
 
         // 1. Check strokes first (highest priority for content)
         double strokeHitDist = 15.0 / G.zoom;
-        for (int i = (int)pg->strokes.size()-1; i >= 0; i--) {
-            StrokeData* s = &pg->strokes[i];
+        for (size_t offset = pg->strokes.size(); offset-- > 0;) {
+            if (offset > static_cast<size_t>(INT_MAX)) continue;
+            const int i = static_cast<int>(offset);
+            StrokeData* s = &pg->strokes[offset];
             if (s->x.size() < 2) continue;
             for (size_t j = 0; j < s->x.size(); j++) {
                 double dx = px - s->x[j], dy = py - s->y[j];
@@ -1123,8 +1277,10 @@ static gboolean on_btnpress(GtkWidget*, GdkEventButton* ev, gpointer) {
         }
 
         // 2. Check texts (using Pango for precise bounding box)
-        for (int i = (int)pg->texts.size()-1; i >= 0; i--) {
-            TxtEl* t = &pg->texts[i];
+        for (size_t offset = pg->texts.size(); offset-- > 0;) {
+            if (offset > static_cast<size_t>(INT_MAX)) continue;
+            const int i = static_cast<int>(offset);
+            TxtEl* t = &pg->texts[offset];
             if (t->text.empty()) continue;
 
             // Use Pango to get exact bounding box
@@ -1172,8 +1328,10 @@ static gboolean on_btnpress(GtkWidget*, GdkEventButton* ev, gpointer) {
         }
 
         // 3. Check images (lowest priority)
-        for (int i = (int)pg->images.size()-1; i >= 0; i--) {
-            ImgEl* img = &pg->images[i];
+        for (size_t offset = pg->images.size(); offset-- > 0;) {
+            if (offset > static_cast<size_t>(INT_MAX)) continue;
+            const int i = static_cast<int>(offset);
+            ImgEl* img = &pg->images[offset];
             double ix = img->x, iy = img->y, iw = img->w, ih = img->h;
             // Resize handle
             if (px >= ix+iw-18/G.zoom && px <= ix+iw && py >= iy+ih-18/G.zoom && py <= iy+ih) {
@@ -1233,6 +1391,7 @@ static gboolean on_btnpress(GtkWidget*, GdkEventButton* ev, gpointer) {
     G.lastY = py;
 
     // Create a new stroke on initial press (only if we're not already drawing)
+    beginMouseUndo();
     pg->strokes.push_back(StrokeData());
     StrokeData* s = &pg->strokes.back();
     s->w = G.penW;
@@ -1247,6 +1406,19 @@ static gboolean on_btnpress(GtkWidget*, GdkEventButton* ev, gpointer) {
 }
 
 static gboolean on_btnrelease(GtkWidget*, GdkEventButton*, gpointer) {
+    if (G.pendingMultiToggle) {
+        PageData* pg = curPage();
+        if (pg) {
+            toggleHitFromMultiSelection(pg, G.multiPressX, G.multiPressY);
+        }
+        G.pendingMultiToggle = 0;
+        G.dragging = 0;
+        G.groupDragging = 0;
+        G.mouseUndoActive = 0;
+        renderCanvas(); updateStatus(); updatePropPanel();
+        return TRUE;
+    }
+
     // Finalize rubber band selection
     if (G.selBoxActive) {
         PageData* pg = curPage();
@@ -1258,31 +1430,34 @@ static gboolean on_btnrelease(GtkWidget*, GdkEventButton*, gpointer) {
             if (bh < 0) { by += bh; bh = -bh; }
 
             // Select all texts in box
-            for (int i = 0; i < (int)pg->texts.size(); i++) {
-                TxtEl* t = &pg->texts[i];
+            for (size_t offset = 0; offset < pg->texts.size(); offset++) {
+                if (offset > static_cast<size_t>(INT_MAX)) continue;
+                TxtEl* t = &pg->texts[offset];
                 if (t->x >= bx && t->x <= bx+bw && t->y >= by && t->y <= by+bh) {
-                    G.selTexts.push_back(i);
+                    G.selTexts.push_back(static_cast<int>(offset));
                 }
             }
             // Select all strokes in box (any point inside)
-            for (int i = 0; i < (int)pg->strokes.size(); i++) {
-                StrokeData* s = &pg->strokes[i];
+            for (size_t offset = 0; offset < pg->strokes.size(); offset++) {
+                if (offset > static_cast<size_t>(INT_MAX)) continue;
+                StrokeData* s = &pg->strokes[offset];
                 for (size_t j = 0; j < s->x.size(); j++) {
                     if (s->x[j] >= bx && s->x[j] <= bx+bw && s->y[j] >= by && s->y[j] <= by+bh) {
-                        G.selStrokes.push_back(i);
+                        G.selStrokes.push_back(static_cast<int>(offset));
                         break;
                     }
                 }
             }
             // Select all images in box (any part inside)
-            for (int i = 0; i < (int)pg->images.size(); i++) {
-                ImgEl* img = &pg->images[i];
+            for (size_t offset = 0; offset < pg->images.size(); offset++) {
+                if (offset > static_cast<size_t>(INT_MAX)) continue;
+                ImgEl* img = &pg->images[offset];
                 double ix1 = img->x, iy1 = img->y;
                 double ix2 = img->x + img->w, iy2 = img->y + img->h;
                 // Check if any corner is inside the box, or if box overlaps image
                 bool overlap = !(ix2 < bx || ix1 > bx+bw || iy2 < by || iy1 > by+bh);
                 if (overlap) {
-                    G.selImages.push_back(i);
+                    G.selImages.push_back(static_cast<int>(offset));
                 }
             }
         }
@@ -1296,9 +1471,7 @@ static gboolean on_btnrelease(GtkWidget*, GdkEventButton*, gpointer) {
     G.dragging = 0;
     G.resizing = 0;
     G.groupDragging = 0;
-    // Save state after any mouse interaction completes
-    pushUndo();
-    NoteData* n=curNote();if(n)n->dirty=1;
+    G.mouseUndoActive = 0;
     return TRUE;
 }
 
@@ -1317,27 +1490,41 @@ static gboolean on_motion(GtkWidget*, GdkEventMotion* ev, gpointer) {
         return TRUE;
     }
 
+    if (G.pendingMultiToggle) {
+        const double dx = px - G.multiPressX;
+        const double dy = py - G.multiPressY;
+        if (sqrt(dx * dx + dy * dy) > 4.0 / G.zoom) {
+            beginMouseUndo();
+            G.pendingMultiToggle = 0;
+            G.groupDragging = 1;
+            G.dragging = 1;
+        } else {
+            return TRUE;
+        }
+    }
+
     if (G.dragging && G.groupDragging) {
+        beginMouseUndo();
         double dx = px - G.dragOffX, dy = py - G.dragOffY;
         for (int i : G.selTexts) {
-            if (i >= 0 && i < (int)pg->texts.size()) {
-                pg->texts[i].x += dx;
-                pg->texts[i].y += dy;
-            }
+            TxtEl* text = itemAt(pg->texts, i);
+            if (!text) continue;
+            text->x += dx;
+            text->y += dy;
         }
         for (int i : G.selStrokes) {
-            if (i >= 0 && i < (int)pg->strokes.size()) {
-                for (size_t j = 0; j < pg->strokes[i].x.size(); j++) {
-                    pg->strokes[i].x[j] += dx;
-                    pg->strokes[i].y[j] += dy;
-                }
+            StrokeData* stroke = itemAt(pg->strokes, i);
+            if (!stroke) continue;
+            for (size_t j = 0; j < stroke->x.size(); j++) {
+                stroke->x[j] += dx;
+                stroke->y[j] += dy;
             }
         }
         for (int i : G.selImages) {
-            if (i >= 0 && i < (int)pg->images.size()) {
-                pg->images[i].x += dx;
-                pg->images[i].y += dy;
-            }
+            ImgEl* image = itemAt(pg->images, i);
+            if (!image) continue;
+            image->x += dx;
+            image->y += dy;
         }
         G.dragOffX = px; G.dragOffY = py;
         NoteData* n = curNote(); if(n) n->dirty = 1;
@@ -1346,8 +1533,8 @@ static gboolean on_motion(GtkWidget*, GdkEventMotion* ev, gpointer) {
     }
 
     if (G.dragging) {
-        if (G.selStroke >= 0 && G.selStroke < (int)pg->strokes.size()) {
-            StrokeData* s = &pg->strokes[G.selStroke];
+        if (StrokeData* s = itemAt(pg->strokes, G.selStroke)) {
+            beginMouseUndo();
             double dx = px - G.dragOffX, dy = py - G.dragOffY;
             for (size_t j = 0; j < s->x.size(); j++) { s->x[j] += dx; s->y[j] += dy; }
             G.dragOffX = px; G.dragOffY = py;
@@ -1355,16 +1542,18 @@ static gboolean on_motion(GtkWidget*, GdkEventMotion* ev, gpointer) {
             renderCanvas();
             return TRUE;
         }
-        if (G.selImg >= 0 && G.selImg < (int)pg->images.size()) {
-            pg->images[G.selImg].x = px - G.dragOffX;
-            pg->images[G.selImg].y = py - G.dragOffY;
+        if (ImgEl* img = itemAt(pg->images, G.selImg)) {
+            beginMouseUndo();
+            img->x = px - G.dragOffX;
+            img->y = py - G.dragOffY;
             NoteData* n = curNote(); if(n) n->dirty = 1;
             renderCanvas();
             return TRUE;
         }
-        if (G.selTxt >= 0 && G.selTxt < (int)pg->texts.size()) {
-            pg->texts[G.selTxt].x = px + G.dragOffX;
-            pg->texts[G.selTxt].y = py + G.dragOffY;
+        if (TxtEl* text = itemAt(pg->texts, G.selTxt)) {
+            beginMouseUndo();
+            text->x = px + G.dragOffX;
+            text->y = py + G.dragOffY;
             NoteData* n = curNote(); if(n) n->dirty = 1;
             renderCanvas();
             return TRUE;
@@ -1373,6 +1562,7 @@ static gboolean on_motion(GtkWidget*, GdkEventMotion* ev, gpointer) {
     }
 
     if (G.resizing && G.selBg && pg->bgSurf && G.selResizeOrigW > 0) {
+        beginMouseUndo();
         // Resize background - scale based on horizontal drag
         double dx = px - G.dragOffX;
         double scale = 1.0 + dx / fmax(1, G.selResizeW);
@@ -1383,8 +1573,10 @@ static gboolean on_motion(GtkWidget*, GdkEventMotion* ev, gpointer) {
         return TRUE;
     }
 
-    if (G.resizing && G.selImg >= 0 && G.selImg < (int)pg->images.size()) {
-        ImgEl* img = &pg->images[G.selImg];
+    if (G.resizing) {
+        ImgEl* img = itemAt(pg->images, G.selImg);
+        if (!img) return TRUE;
+        beginMouseUndo();
         double aspect = G.selResizeW / fmax(1, G.selResizeH);
         double newW = fmax(20, G.selResizeW + (px - G.dragOffX));
         img->w = newW;
@@ -1397,6 +1589,7 @@ static gboolean on_motion(GtkWidget*, GdkEventMotion* ev, gpointer) {
     if (G.drawing) {
         // Add point to the current stroke (the last one in the vector)
         if (!pg->strokes.empty()) {
+            beginMouseUndo();
             StrokeData* s = &pg->strokes.back();
             s->addPt(px, py);
             G.lastX = px; G.lastY = py;
@@ -1491,7 +1684,7 @@ static gboolean on_keypress(GtkWidget*, GdkEventKey* ev, gpointer) {
                 if (data && len > 0) {
                     GError* err = nullptr;
                     GdkPixbufLoader* loader = gdk_pixbuf_loader_new();
-                    if (gdk_pixbuf_loader_write(loader, data, len, &err)) {
+                    if (gdk_pixbuf_loader_write(loader, data, static_cast<gsize>(len), &err)) {
                         gdk_pixbuf_loader_close(loader, nullptr);
                         pb = gdk_pixbuf_loader_get_pixbuf(loader);
                         if (pb) g_object_ref(pb);
@@ -1588,9 +1781,10 @@ static gboolean on_keypress(GtkWidget*, GdkEventKey* ev, gpointer) {
     // R = Rotate selected image 90 degrees clockwise
     if (ev->keyval == GDK_KEY_r || ev->keyval == GDK_KEY_R) {
         PageData* pg = curPage();
-        if (pg && G.selImg >= 0 && G.selImg < (int)pg->images.size()) {
+        if (pg) {
+            ImgEl* img = itemAt(pg->images, G.selImg);
+            if (!img) return FALSE;
             pushUndo();
-            ImgEl* img = &pg->images[G.selImg];
             img->rotateAngle = (img->rotateAngle + 90) % 360;
             // Swap w/h on 90/270 degree rotation
             if (img->rotateAngle == 90 || img->rotateAngle == 270) {
@@ -1606,9 +1800,10 @@ static gboolean on_keypress(GtkWidget*, GdkEventKey* ev, gpointer) {
     // C = Crop selected image (simple: halve width and height)
     if (ev->keyval == GDK_KEY_c || ev->keyval == GDK_KEY_C) {
         PageData* pg = curPage();
-        if (pg && G.selImg >= 0 && G.selImg < (int)pg->images.size()) {
+        if (pg) {
+            ImgEl* img = itemAt(pg->images, G.selImg);
+            if (!img) return FALSE;
             pushUndo();
-            ImgEl* img = &pg->images[G.selImg];
             // Simple crop: keep center half
             double newW = img->w / 2.0;
             double newH = img->h / 2.0;
@@ -1627,25 +1822,9 @@ static gboolean on_keypress(GtkWidget*, GdkEventKey* ev, gpointer) {
     if (ev->keyval == GDK_KEY_Delete || ev->keyval == GDK_KEY_BackSpace) {
         bool deletedAny = false;
         // 1. Multi-select batch delete
-        if (!G.selTexts.empty() || !G.selStrokes.empty() || !G.selImages.empty()) {
+        if (hasMultiSelection()) {
             pushUndo();
-            for (int i = (int)G.selTexts.size()-1; i >= 0; i--) {
-                if (G.selTexts[i] >= 0 && G.selTexts[i] < (int)pg->texts.size())
-                    pg->texts.erase(pg->texts.begin() + G.selTexts[i]);
-            }
-            G.selTexts.clear(); G.selTxt = -1;
-            for (int i = (int)G.selStrokes.size()-1; i >= 0; i--) {
-                if (G.selStrokes[i] >= 0 && G.selStrokes[i] < (int)pg->strokes.size())
-                    pg->strokes.erase(pg->strokes.begin() + G.selStrokes[i]);
-            }
-            G.selStrokes.clear(); G.selStroke = -1;
-            for (int i = (int)G.selImages.size()-1; i >= 0; i--) {
-                if (G.selImages[i] >= 0 && G.selImages[i] < (int)pg->images.size())
-                    pg->images.erase(pg->images.begin() + G.selImages[i]);
-            }
-            G.selImages.clear(); G.selImg = -1;
-            G.groupDragging = 0;
-            deletedAny = true;
+            deletedAny = eraseSelectedItems(pg);
         }
         // 2. Single-item delete
         if (!deletedAny && G.selImg >= 0 && G.selImg < (int)pg->images.size()) {
@@ -1679,7 +1858,14 @@ static void on_tool_pen(GtkButton*, gpointer) { hideTextEntry(); G.tool=0; updat
 static void on_tool_hl(GtkButton*, gpointer) { hideTextEntry(); G.tool=1; updateStatus(); }
 static void on_tool_eraser(GtkButton*, gpointer) { hideTextEntry(); G.tool=2; updateStatus(); }
 static void on_tool_text(GtkButton*, gpointer) { G.tool=3; updateStatus(); }
-static void on_tool_select(GtkButton*, gpointer) { hideTextEntry(); G.tool=4; G.selImg=-1; G.selTxt=-1; updateStatus(); updatePropPanel(); }
+static void on_tool_select(GtkButton*, gpointer) {
+    hideTextEntry();
+    G.tool=4;
+    G.selImg=-1; G.selTxt=-1; G.selStroke=-1; G.selBg=0;
+    G.selTexts.clear(); G.selStrokes.clear(); G.selImages.clear();
+    G.pendingMultiToggle=0; G.groupDragging=0; G.dragging=0; G.resizing=0;
+    updateStatus(); updatePropPanel();
+}
 
 static void on_color(GtkButton*, gpointer) {
     GtkWidget* dlg = gtk_color_chooser_dialog_new("\xe9\x81\xb8\xe6\x93\x87\xe9\xa1\x8f\xe8\x89\xb2", GTK_WINDOW(G.window));
@@ -1758,45 +1944,29 @@ static void on_redo(GtkButton*, gpointer) {
 static void on_del(GtkButton*, gpointer) {
     PageData* pg=curPage(); if(!pg) return;
 
-    pushUndo();
+    bool deletedAny = false;
 
-    // Delete multiple selected texts
-    if (!G.selTexts.empty()) {
-        for (int i = (int)G.selTexts.size()-1; i >= 0; i--) {
-            pg->texts.erase(pg->texts.begin() + G.selTexts[i]);
-        }
-        G.selTexts.clear();
-        G.selTxt = -1;
+    if (hasMultiSelection()) {
+        pushUndo();
+        deletedAny = eraseSelectedItems(pg);
     }
-
-    // Delete multiple selected strokes
-    if (!G.selStrokes.empty()) {
-        for (int i = (int)G.selStrokes.size()-1; i >= 0; i--) {
-            pg->strokes.erase(pg->strokes.begin() + G.selStrokes[i]);
-        }
-        G.selStrokes.clear();
-        G.selStroke = -1;
-    }
-
-    // Delete multiple selected images
-    if (!G.selImages.empty()) {
-        for (int i = (int)G.selImages.size()-1; i >= 0; i--) {
-            pg->images.erase(pg->images.begin() + G.selImages[i]);
-        }
-        G.selImages.clear();
-        G.selImg = -1;
-    }
-
-    // Fallback: single item delete
-    if (G.selImg>=0 && G.selImg<(int)pg->images.size()){
+    else if (G.selImg>=0 && G.selImg<(int)pg->images.size()){
+        pushUndo();
         pg->images.erase(pg->images.begin()+G.selImg);G.selImg=-1;
+        deletedAny = true;
     }
     else if(G.selTxt>=0 && G.selTxt<(int)pg->texts.size()){
+        pushUndo();
         pg->texts.erase(pg->texts.begin()+G.selTxt);G.selTxt=-1;
+        deletedAny = true;
     }
-    else if(!pg->strokes.empty()){
-        pg->strokes.pop_back();
+    else if(G.selStroke>=0 && G.selStroke<(int)pg->strokes.size()){
+        pushUndo();
+        pg->strokes.erase(pg->strokes.begin()+G.selStroke);G.selStroke=-1;
+        deletedAny = true;
     }
+
+    if (!deletedAny) return;
 
     NoteData* n=curNote();if(n)n->dirty=1;
     if (G.canvasSurf) { cairo_surface_destroy(G.canvasSurf); G.canvasSurf = nullptr; }
@@ -1820,22 +1990,24 @@ static void on_row_delete_clicked(GtkButton*, gpointer user_data) {
 
 static void rebuildNoteList() {
     if (!G.noteList) return;
-    gtk_container_foreach(GTK_CONTAINER(G.noteList), (GtkCallback)gtk_widget_destroy, nullptr);
+    gtk_container_foreach(GTK_CONTAINER(G.noteList), destroyChild, nullptr);
     for (size_t i = 0; i < G.notes.size(); i++) {
+        if (i > static_cast<size_t>(INT_MAX)) continue;
+        const int rowIndex = static_cast<int>(i);
         // 搜尋過濾
         if (!G.searchTerm.empty()) {
             std::string nameLower = G.notes[i].name;
             std::string searchLower = G.searchTerm;
             // 轉小寫比較
-            for (auto& c : nameLower) c = tolower(c);
-            for (auto& c : searchLower) c = tolower(c);
+            for (auto& c : nameLower) c = lowerByte(c);
+            for (auto& c : searchLower) c = lowerByte(c);
             bool match = nameLower.find(searchLower) != std::string::npos;
             // 也搜尋內容
             if (!match) {
                 for (auto& pg : G.notes[i].pages) {
                     for (auto& t : pg.texts) {
                         std::string txtLower = t.text;
-                        for (auto& c : txtLower) c = tolower(c);
+                        for (auto& c : txtLower) c = lowerByte(c);
                         if (txtLower.find(searchLower) != std::string::npos) { match = true; break; }
                     }
                     if (match) break;
@@ -1859,7 +2031,7 @@ static void rebuildNoteList() {
         GtkWidget* renBtn = gtk_button_new_with_label("\xe2\x9c\x8e");
         gtk_widget_set_tooltip_text(renBtn, "\xe9\x87\x8d\xe6\x96\xb0\xe5\x91\xbd\xe5\x90\x8d");
         gtk_widget_set_size_request(renBtn, 24, 24);
-        g_signal_connect(renBtn, "clicked", G_CALLBACK(on_row_rename_clicked), GINT_TO_POINTER(i));
+        g_signal_connect(renBtn, "clicked", G_CALLBACK(on_row_rename_clicked), GINT_TO_POINTER(rowIndex));
         gtk_box_pack_start(GTK_BOX(hbox), renBtn, FALSE, FALSE, 0);
 
         // Delete button
@@ -1868,16 +2040,16 @@ static void rebuildNoteList() {
         gtk_widget_set_size_request(delBtn, 24, 24);
         GtkStyleContext* dsc = gtk_widget_get_style_context(delBtn);
         gtk_style_context_add_class(dsc, "destructive-action");
-        g_signal_connect(delBtn, "clicked", G_CALLBACK(on_row_delete_clicked), GINT_TO_POINTER(i));
+        g_signal_connect(delBtn, "clicked", G_CALLBACK(on_row_delete_clicked), GINT_TO_POINTER(rowIndex));
         gtk_box_pack_start(GTK_BOX(hbox), delBtn, FALSE, FALSE, 0);
 
         gtk_container_add(GTK_CONTAINER(row), hbox);
         gtk_widget_show_all(row);
-        if ((int)i == G.selNote) {
+        if (rowIndex == G.selNote) {
             GtkStyleContext* rsc = gtk_widget_get_style_context(row);
             gtk_style_context_add_class(rsc, "note-selected");
         }
-        g_object_set_data(G_OBJECT(row), "idx", GINT_TO_POINTER(i));
+        g_object_set_data(G_OBJECT(row), "idx", GINT_TO_POINTER(rowIndex));
         gtk_list_box_insert(GTK_LIST_BOX(G.noteList), row, -1);
     }
 }
@@ -1949,7 +2121,7 @@ static cairo_surface_t* buildThumbSurface(PageData* pg, int thumbW) {
 
 static void rebuildThumbs() {
     if (!G.pageThumbs) return;
-    gtk_container_foreach(GTK_CONTAINER(G.pageThumbs), (GtkCallback)gtk_widget_destroy, nullptr);
+    gtk_container_foreach(GTK_CONTAINER(G.pageThumbs), destroyChild, nullptr);
 
     // 清理舊縮圖 surface
     for (auto* s : G.pageThumbSurf) { if (s) cairo_surface_destroy(s); }
@@ -1960,6 +2132,8 @@ static void rebuildThumbs() {
 
     int thumbW = 130;
     for (size_t i = 0; i < n->pages.size(); i++) {
+        if (i > static_cast<size_t>(INT_MAX)) continue;
+        const int pageIndex = static_cast<int>(i);
         PageData* pg = &n->pages[i];
         cairo_surface_t* thumbSurf = buildThumbSurface(pg, thumbW);
         G.pageThumbSurf.push_back(thumbSurf);
@@ -1990,7 +2164,7 @@ static void rebuildThumbs() {
         GtkWidget* lbl = gtk_label_new("");
         char pageLbl[32];
         snprintf(pageLbl, sizeof(pageLbl), "P%zu%s", i + 1,
-            (int)i == G.selPage ? " ◀" : "");
+            pageIndex == G.selPage ? " ◀" : "");
         gtk_label_set_text(GTK_LABEL(lbl), pageLbl);
         gtk_widget_set_halign(lbl, GTK_ALIGN_CENTER);
         gtk_box_pack_start(GTK_BOX(box), lbl, FALSE, FALSE, 0);
@@ -1998,22 +2172,22 @@ static void rebuildThumbs() {
         gtk_container_add(GTK_CONTAINER(row), box);
         gtk_widget_show_all(row);
 
-        if ((int)i == G.selPage) {
+        if (pageIndex == G.selPage) {
             GtkStyleContext* rsc = gtk_widget_get_style_context(row);
             gtk_style_context_add_class(rsc, GTK_STYLE_CLASS_SUGGESTED_ACTION);
         }
-        g_object_set_data(G_OBJECT(row), "idx", GINT_TO_POINTER(i));
+        g_object_set_data(G_OBJECT(row), "idx", GINT_TO_POINTER(pageIndex));
         gtk_list_box_insert(GTK_LIST_BOX(G.pageThumbs), row, -1);
     }
 }
 
 static void on_note_activated(GtkListBox*, GtkListBoxRow* row, gpointer) {
     int idx = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(row), "idx"));
-    if (idx < 0 || idx >= (int)G.notes.size()) return;
+    if (!itemAt(G.notes, idx)) return;
     hideTextEntry();
-    if (G.selNote >= 0 && G.selNote < (int)G.notes.size() && G.notes[G.selNote].dirty) {
-        logInfo("Auto-save: %s", G.notes[G.selNote].name.c_str());
-        G.notes[G.selNote].dirty = 0;
+    if (NoteData* selected = itemAt(G.notes, G.selNote); selected && selected->dirty) {
+        logInfo("Auto-save: %s", selected->name.c_str());
+        selected->dirty = 0;
     }
     G.selNote = idx; G.selPage = 0;
     if (G.canvasSurf) { cairo_surface_destroy(G.canvasSurf); G.canvasSurf = nullptr; }
@@ -2024,8 +2198,8 @@ static void on_note_activated(GtkListBox*, GtkListBoxRow* row, gpointer) {
 // Note context menu
 static void on_note_rename(GtkMenuItem*, gpointer user_data) {
     int idx = GPOINTER_TO_INT(user_data);
-    if (idx < 0 || idx >= (int)G.notes.size()) return;
-    NoteData* nd = &G.notes[idx];
+    NoteData* nd = itemAt(G.notes, idx);
+    if (!nd) return;
 
     GtkWidget* dlg = gtk_dialog_new_with_buttons("\xe9\x87\x8d\xe5\x91\xbd\xe5\x90\x8d\xe7\xad\x86\xe8\xa8\x98",
         GTK_WINDOW(G.window), (GtkDialogFlags)(GTK_DIALOG_MODAL|GTK_DIALOG_DESTROY_WITH_PARENT),
@@ -2050,7 +2224,8 @@ static void on_note_rename(GtkMenuItem*, gpointer user_data) {
 
 static void on_note_delete(GtkMenuItem*, gpointer user_data) {
     int idx = GPOINTER_TO_INT(user_data);
-    if (idx < 0 || idx >= (int)G.notes.size()) return;
+    NoteData* nd = itemAt(G.notes, idx);
+    if (!nd) return;
     if (G.notes.size() <= 1) {
         GtkWidget* info = gtk_message_dialog_new(GTK_WINDOW(G.window), GTK_DIALOG_MODAL,
             GTK_MESSAGE_WARNING, GTK_BUTTONS_OK,
@@ -2063,7 +2238,7 @@ static void on_note_delete(GtkMenuItem*, gpointer user_data) {
     GtkWidget* dlg = gtk_message_dialog_new(GTK_WINDOW(G.window), GTK_DIALOG_MODAL,
         GTK_MESSAGE_QUESTION, GTK_BUTTONS_NONE,
         "確定刪除筆記「%s」嗎?\n此操作無法復原",
-        G.notes[idx].name.c_str());
+        nd->name.c_str());
     gtk_dialog_add_buttons(GTK_DIALOG(dlg),
         "取消", GTK_RESPONSE_CANCEL,
         "刪除", GTK_RESPONSE_ACCEPT, nullptr);
@@ -2074,14 +2249,14 @@ static void on_note_delete(GtkMenuItem*, gpointer user_data) {
 
     if (resp == GTK_RESPONSE_ACCEPT) {
         // Delete the .onote file from disk as well
-        std::string fn = note_filename(&G.notes[idx]);
+        std::string fn = note_filename(nd);
         std::error_code ec;
         fs::remove(fn, ec);
         if (ec) {
             logInfo("刪除檔案失敗: %s: %s", fn.c_str(), ec.message().c_str());
         }
 
-        G.notes.erase(G.notes.begin() + idx);
+        G.notes.erase(G.notes.begin() + static_cast<std::vector<NoteData>::difference_type>(idx));
         if (G.selNote == idx) {
             G.selNote = (idx < (int)G.notes.size()) ? idx : (int)G.notes.size() - 1;
             G.selPage = 0;
@@ -2103,9 +2278,7 @@ static gboolean on_note_list_button_press(GtkWidget*, GdkEventButton* ev, gpoint
     if (!row) return FALSE;
 
     int idx = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(row), "idx"));
-    if (idx < 0 || idx >= (int)G.notes.size()) return FALSE;
-
-    NoteData* nd = &G.notes[idx];
+    if (!itemAt(G.notes, idx)) return FALSE;
 
     // Build context menu
     GtkWidget* menu = gtk_menu_new();
@@ -2261,9 +2434,10 @@ static std::string note_filename(NoteData* nd) {
 }
 
 // Helper: Convert wide string to UTF-8
-static std::string wstring_to_utf8(const std::wstring& wstr) {
+[[maybe_unused]] static std::string wstring_to_utf8(const std::wstring& wstr) {
     int len = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), (int)wstr.size(), NULL, 0, NULL, NULL);
-    std::string result(len, 0);
+    if (len <= 0) return "";
+    std::string result(static_cast<size_t>(len), 0);
     WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), (int)wstr.size(), &result[0], len, NULL, NULL);
     return result;
 }
@@ -2272,7 +2446,7 @@ static std::string wstring_to_utf8(const std::wstring& wstr) {
 static std::wstring utf8_to_wide(const std::string& utf8) {
     int len = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
     if (len <= 0) return L"";
-    std::wstring result(len, 0);
+    std::wstring result(static_cast<size_t>(len), 0);
     MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, &result[0], len);
     if (!result.empty() && result.back() == L'\0') result.pop_back();
     return result;
@@ -2415,8 +2589,7 @@ static void deserializeNoteToCurrent(const std::string& data) {
             continue;
         }
 
-        if (curPage >= 0 && curPage < (int)nd->pages.size()) {
-            PageData* pg = &nd->pages[curPage];
+        if (PageData* pg = itemAt(nd->pages, curPage)) {
             if (line.substr(0, 3) == "pw=") { pg->pw = atof(line.c_str()+3); continue; }
             if (line.substr(0, 3) == "ph=") { pg->ph = atof(line.c_str()+3); continue; }
 
@@ -2666,8 +2839,7 @@ static bool load_note_from_file(const std::string& fn_utf8, NoteData* nd) {
             continue;
         }
 
-        if (curPage >= 0 && curPage < (int)nd->pages.size()) {
-            PageData* pg = &nd->pages[curPage];
+        if (PageData* pg = itemAt(nd->pages, curPage)) {
 
             if (sline.substr(0, 3) == "pw=") { pg->pw = atof(sline.c_str()+3); continue; }
             if (sline.substr(0, 3) == "ph=") { pg->ph = atof(sline.c_str()+3); continue; }
@@ -2828,7 +3000,7 @@ static void on_load_note(const std::string& fn) {
     G.notes.push_back(NoteData());
     NoteData* nd = &G.notes.back();
     if (load_note_from_file(fn, nd)) {
-        G.selNote = (int)G.notes.size() - 1;
+        G.selNote = boundedIntCount(G.notes.size() - 1);
         G.selPage = 0;
         if (G.canvasSurf) { cairo_surface_destroy(G.canvasSurf); G.canvasSurf = nullptr; }
         rebuildNoteList(); renderCanvas(); updateStatus(); rebuildThumbs();
@@ -2871,7 +3043,10 @@ static void on_batch_import(GtkButton*, gpointer) {
 
             // Select first imported note if any
             if (imported > 0) {
-                G.selNote = G.notes.size() - imported;
+                const size_t importedCount = static_cast<size_t>(imported);
+                if (importedCount <= G.notes.size()) {
+                    G.selNote = boundedIntCount(G.notes.size() - importedCount);
+                }
                 G.selPage = 0;
                 if (G.canvasSurf) { cairo_surface_destroy(G.canvasSurf); G.canvasSurf = nullptr; }
                 rebuildNoteList(); renderCanvas(); updateStatus(); rebuildThumbs();
@@ -3795,7 +3970,7 @@ static void on_page_settings(GtkButton*, gpointer) {
 static void on_about(GtkButton*, gpointer) {
     GtkWidget* dlg=gtk_about_dialog_new();
     gtk_about_dialog_set_program_name(GTK_ABOUT_DIALOG(dlg),"OfflineNote");
-    gtk_about_dialog_set_version(GTK_ABOUT_DIALOG(dlg),"2.0");
+    gtk_about_dialog_set_version(GTK_ABOUT_DIALOG(dlg),OFFLINENOTE_APP_VERSION);
     gtk_about_dialog_set_comments(GTK_ABOUT_DIALOG(dlg),"離線筆記本");
     gtk_about_dialog_set_license(GTK_ABOUT_DIALOG(dlg),"GPL-2.0");
     gtk_dialog_run(GTK_DIALOG(dlg));gtk_widget_destroy(dlg);
@@ -3811,6 +3986,8 @@ static void on_quit(GtkButton*, gpointer) {
 // ============================================================
 static void tb(GtkToolbar* tb, const char* lb, GCallback cb) {
     GtkToolItem* btn=gtk_tool_button_new(nullptr,lb);
+    gtk_tool_item_set_is_important(btn, TRUE);
+    gtk_widget_set_tooltip_text(GTK_WIDGET(btn), lb);
     g_signal_connect(btn,"clicked",cb,nullptr);
     gtk_toolbar_insert(tb,btn,-1);
 }
@@ -3895,7 +4072,7 @@ MainWindow::MainWindow(GtkApplication* app, AppController& ctrl) : app_(app), co
 
     // ── Toolbar ──
     GtkToolbar* toolbar = GTK_TOOLBAR(gtk_toolbar_new());
-    gtk_toolbar_set_style(toolbar, GTK_TOOLBAR_ICONS);
+    gtk_toolbar_set_style(toolbar, GTK_TOOLBAR_BOTH_HORIZ);
     gtk_toolbar_set_icon_size(toolbar, GTK_ICON_SIZE_SMALL_TOOLBAR);
 
     tb(toolbar,"📄 新增筆記",G_CALLBACK(on_newnote));

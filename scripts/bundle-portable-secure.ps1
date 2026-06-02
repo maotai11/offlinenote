@@ -14,7 +14,8 @@ param(
     [string]$BuildDir = "$PSScriptRoot\..\build",
     [string]$DistDir = "$PSScriptRoot\..\dist",
     [string]$PortableDir = "$DistDir\portable",
-    [string]$OutputDir = "$DistDir"
+    [string]$OutputDir = "$DistDir",
+    [string]$StageDir = "$DistDir\portable_package_stage"
 )
 
 $ErrorActionPreference = "Stop"
@@ -71,7 +72,7 @@ if ($DllMissing.Count -gt 0) {
 # ── 4. 產生安全報告
 Write-Host "[4/5] 產生安全驗證報告..." -ForegroundColor Yellow
 $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-$Version = "4.0.4"
+$Version = "4.0.5"
 $BuildTimestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 
 $ReportPath = "$PortableDir\SECURITY-AUDIT-REPORT.txt"
@@ -96,6 +97,7 @@ Build ID: $BuildTimestamp
   ✓ GTK 3.24.52: 無已知 CVE
   ✓ 無外部網路呼叫
   ✓ 無可疑 PowerShell 腳本
+  ✓ Runtime data excluded from package (notes/logs/cache)
 
 DLL 驗證:
   ✓ 所有必要 DLL 存在
@@ -119,8 +121,36 @@ if (Test-Path $ZipPath) {
     Remove-Item $ZipPath -Force
 }
 
-Compress-Archive -Path "$PortableDir\*" -DestinationPath $ZipPath -CompressionLevel Optimal
+if (Test-Path $StageDir) {
+    Remove-Item $StageDir -Recurse -Force
+}
+
+Copy-Item -Path $PortableDir -Destination $StageDir -Recurse -Force
+
+$RuntimeDataDirs = @(
+    "$StageDir\data\cache",
+    "$StageDir\data\logs",
+    "$StageDir\data\notes"
+)
+foreach ($RuntimeDir in $RuntimeDataDirs) {
+    if (Test-Path $RuntimeDir) {
+        Remove-Item $RuntimeDir -Recurse -Force
+    }
+    New-Item -Path $RuntimeDir -ItemType Directory -Force | Out-Null
+}
+
+$LeakedRuntimeFiles = Get-ChildItem -Path "$StageDir\data" -Recurse -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.Extension -in @(".onote", ".log", ".tmp") }
+if ($LeakedRuntimeFiles) {
+    Write-Host "[ERROR] Runtime data leaked into package staging:" -ForegroundColor Red
+    $LeakedRuntimeFiles | ForEach-Object { Write-Host "  $($_.FullName)" -ForegroundColor Red }
+    exit 1
+}
+
+Compress-Archive -Path "$StageDir\*" -DestinationPath $ZipPath -CompressionLevel Optimal
 Write-Host "  ✓ 打包完成: $ZipName" -ForegroundColor Green
+
+Remove-Item $StageDir -Recurse -Force
 
 # ── 計算 ZIP SHA256
 $ZipHash = (Get-FileHash $ZipPath -Algorithm SHA256).Hash

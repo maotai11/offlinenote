@@ -4,6 +4,7 @@
 
 #include <functional>
 #include <iostream>
+#include <cmath>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -43,6 +44,38 @@ struct TestCaseRegistrar {
 class TestAssertionFailed : public std::runtime_error {
 public:
     explicit TestAssertionFailed(const std::string& msg) : std::runtime_error(msg) {}
+};
+
+class Approx {
+public:
+    explicit Approx(double value) : value_(value) {}
+
+    Approx& epsilon(double value) {
+        epsilon_ = value;
+        return *this;
+    }
+
+    friend bool operator==(double lhs, const Approx& rhs) {
+        const double diff = std::fabs(lhs - rhs.value_);
+        const double scale = std::fmax(std::fabs(lhs), std::fabs(rhs.value_));
+        return diff <= rhs.epsilon_ * (scale > 1.0 ? scale : 1.0);
+    }
+
+    friend bool operator==(const Approx& lhs, double rhs) {
+        return rhs == lhs;
+    }
+
+    friend bool operator!=(double lhs, const Approx& rhs) {
+        return !(lhs == rhs);
+    }
+
+    friend bool operator!=(const Approx& lhs, double rhs) {
+        return !(lhs == rhs);
+    }
+
+private:
+    double value_;
+    double epsilon_ = 1e-12;
 };
 
 #define REQUIRE(x) do { \
